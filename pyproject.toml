@@ -1,0 +1,20 @@
+[project]
+name = "mailmate-search"
+version = "0.1.0"
+description = "AI-powered semantic search for MailMate emails"
+requires-python = ">=3.10"
+dependencies = [
+    "sentence-transformers>=2.2.0",
+    "chromadb>=0.4.0",
+    "click>=8.1.0",
+    "python-dotenv>=1.0.0",
+    "tqdm>=4.65.0",
+]
+
+[project.scripts]
+mailmate-search = "mailmate_search.cli:main"
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+

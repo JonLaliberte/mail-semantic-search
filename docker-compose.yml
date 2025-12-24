@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  mailmate-search:
+    build: .
+    container_name: mailmate-search
+    volumes:
+      - ${MAILMATE_EMAIL_DIR}:/emails:ro
+      - ./data/chromadb:/app/data/chromadb
+      - ./data/models:/app/data/models
+    environment:
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-BGE-base-en-v1.5}
+      - MAILMATE_EMAIL_DIR=/emails
+      - CHROMADB_PATH=/app/data/chromadb
+      - MODEL_CACHE_DIR=/app/data/models
+      - BATCH_SIZE=${BATCH_SIZE:-32}
+      - SEARCH_RESULTS=${SEARCH_RESULTS:-10}
+    env_file:
+      - .env
+    stdin_open: true
+    tty: true
+
