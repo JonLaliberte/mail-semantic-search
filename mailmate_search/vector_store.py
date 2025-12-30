@@ -46,27 +46,73 @@ class VectorStore:
         self,
         emails: List[Dict],
         embeddings: List[List[float]],
+        texts: Optional[List[str]] = None,
     ) -> None:
-        """Add emails and their embeddings to the vector store."""
+        """
+        Add emails and their embeddings to the vector store.
+        
+        Args:
+            emails: List of email dictionaries
+            embeddings: List of embedding vectors
+            texts: Optional list of combined text strings (from combine_email_text).
+                   If not provided, will generate from email data.
+        """
         if not emails or not embeddings:
             return
 
         ids = [self._get_file_hash(email["file_path"]) for email in emails]
-        texts = [
-            f"{email['subject']}\n{email['body'][:1000]}"
-            for email in emails
-        ]
-        metadatas = [
-            {
+        
+        # Use provided texts if available (should include attachment content from combine_email_text)
+        # Otherwise generate fallback text
+        if texts is None or len(texts) != len(emails):
+            texts = []
+            for email in emails:
+                subject = email.get("subject", "")
+                body = email.get("body", "")[:1000]
+                text = f"{subject}\n{body}"
+                
+                # Add attachment filenames
+                attachments = email.get("attachments", [])
+                if attachments:
+                    attachment_names = ", ".join(
+                        att.get("filename", "Unknown") for att in attachments[:5]
+                    )
+                    if len(attachments) > 5:
+                        attachment_names += f" (+{len(attachments) - 5} more)"
+                    text += f"\nAttachments: {attachment_names}"
+                
+                texts.append(text)
+        
+        metadatas = []
+        for email in emails:
+            attachments = email.get("attachments", [])
+            attachment_count = len(attachments)
+            
+            # Get attachment types/extensions for filtering
+            attachment_types = []
+            if attachments:
+                for att in attachments[:10]:  # Limit to first 10 to avoid metadata size issues
+                    filename = att.get("filename", "")
+                    if filename:
+                        ext = filename.split(".")[-1].lower() if "." in filename else ""
+                        if ext and ext not in attachment_types:
+                            attachment_types.append(ext)
+            
+            metadata = {
                 "subject": email["subject"][:500],  # ChromaDB has metadata size limits
                 "from": email["from"][:500],
                 "to": email["to"][:500],
                 "date": str(email["date"]) if email["date"] else "",
                 "message_id": email["message_id"][:500],
                 "file_path": email["file_path"],
+                "attachment_count": attachment_count,
             }
-            for email in emails
-        ]
+            
+            # Add attachment types if any
+            if attachment_types:
+                metadata["attachment_types"] = ",".join(attachment_types[:5])  # Limit types
+            
+            metadatas.append(metadata)
 
         self.collection.add(
             ids=ids,

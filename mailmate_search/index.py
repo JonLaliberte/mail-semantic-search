@@ -14,11 +14,55 @@ from mailmate_search.vector_store import VectorStore
 
 
 def combine_email_text(email: dict) -> str:
-    """Combine email fields into a single text for embedding."""
+    """
+    Combine email fields and attachment content into a single text for embedding.
+    
+    Includes:
+    - Subject, from address, and body
+    - Attachment filenames
+    - Extracted text from attachments (with length limits)
+    """
     subject = email.get("subject", "")
     body = email.get("body", "")[:2000]  # Limit body length
     from_addr = email.get("from", "")
-    return f"{subject}\n{from_addr}\n{body}".strip()
+    
+    # Build base text
+    text_parts = [subject, from_addr, body]
+    
+    # Add attachment information
+    attachments = email.get("attachments", [])
+    if attachments:
+        text_parts.append("Attachments:")
+        
+        # Limit total attachment text to prevent embedding size issues
+        max_chars_per_attachment = 2000
+        max_total_attachment_chars = 5000
+        total_attachment_chars = 0
+        
+        for attachment in attachments:
+            filename = attachment.get("filename", "Unknown")
+            text_parts.append(filename)
+            
+            # Add extracted text if available
+            extracted_text = attachment.get("extracted_text")
+            if extracted_text:
+                # Truncate per-attachment text
+                truncated_text = extracted_text[:max_chars_per_attachment]
+                if len(extracted_text) > max_chars_per_attachment:
+                    truncated_text += "..."
+                
+                # Check total limit
+                if total_attachment_chars + len(truncated_text) > max_total_attachment_chars:
+                    remaining = max_total_attachment_chars - total_attachment_chars
+                    if remaining > 0:
+                        truncated_text = truncated_text[:remaining] + "..."
+                    text_parts.append(truncated_text)
+                    break
+                
+                text_parts.append(truncated_text)
+                total_attachment_chars += len(truncated_text)
+    
+    return "\n".join(text_parts).strip()
 
 
 def index_emails(
@@ -119,8 +163,8 @@ def index_emails(
             # Generate embeddings
             embeddings = embedding_service.embed_texts(texts)
 
-            # Store in vector database
-            vector_store.add_emails(emails_to_index, embeddings)
+            # Store in vector database (pass texts so ChromaDB stores the correct document content)
+            vector_store.add_emails(emails_to_index, embeddings, texts)
 
             total_indexed += len(emails_to_index)
 

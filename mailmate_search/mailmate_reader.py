@@ -9,6 +9,8 @@ from typing import Dict, Iterator, List, Optional
 from tqdm import tqdm
 from unquotemail import UnquoteMail
 
+from mailmate_search.attachment_extractor import extract_text_from_attachment
+
 # Initialize unquote parser once for reuse
 _unquote_parser = UnquoteMail()
 
@@ -50,8 +52,17 @@ def remove_quoted_reply(text: str) -> str:
         return text
 
 
-def extract_attachments(msg) -> List[Dict]:
-    """Extract attachment information from email message."""
+def extract_attachments(msg, extract_text: bool = True) -> List[Dict]:
+    """
+    Extract attachment information from email message.
+    
+    Args:
+        msg: Email message object
+        extract_text: Whether to extract text content from attachments (default: True)
+    
+    Returns:
+        List of attachment dictionaries with metadata and optionally extracted text
+    """
     attachments = []
     
     for part in msg.walk():
@@ -98,16 +109,30 @@ def extract_attachments(msg) -> List[Dict]:
                 except (ValueError, TypeError):
                     pass
             
-            # If no size from header, try to get from payload
-            if size == 0:
+            # Get payload for size and text extraction
+            payload = None
+            if size == 0 or extract_text:
                 try:
                     payload = part.get_payload(decode=True)
-                    if payload:
+                    if payload and size == 0:
                         size = len(payload)
                 except Exception:
                     pass
             
             attachment["size"] = size
+            
+            # Extract text content if requested
+            if extract_text and payload:
+                try:
+                    extracted_text = extract_text_from_attachment(
+                        payload, attachment["content_type"], attachment["filename"]
+                    )
+                    if extracted_text:
+                        attachment["extracted_text"] = extracted_text
+                except Exception:
+                    # If text extraction fails, continue without it
+                    pass
+            
             attachments.append(attachment)
     
     return attachments
