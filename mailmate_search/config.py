@@ -36,6 +36,10 @@ class Config:
         model_cache_dir = os.getenv("MODEL_CACHE_DIR", "./data/models")
         self.model_cache_dir = Path(model_cache_dir)
 
+        # Database path
+        database_path = os.getenv("DATABASE_PATH", "./data/database.db")
+        self.database_path = Path(database_path)
+
         # Processing configuration
         self.batch_size: int = int(os.getenv("BATCH_SIZE", "32"))
         self.search_results: int = int(os.getenv("SEARCH_RESULTS", "10"))
@@ -43,6 +47,7 @@ class Config:
         # Ensure directories exist
         self.chromadb_path.mkdir(parents=True, exist_ok=True)
         self.model_cache_dir.mkdir(parents=True, exist_ok=True)
+        self.database_path.parent.mkdir(parents=True, exist_ok=True)
 
     def __repr__(self) -> str:
         return (

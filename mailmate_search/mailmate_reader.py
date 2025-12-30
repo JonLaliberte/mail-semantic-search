@@ -50,6 +50,69 @@ def remove_quoted_reply(text: str) -> str:
         return text
 
 
+def extract_attachments(msg) -> List[Dict]:
+    """Extract attachment information from email message."""
+    attachments = []
+    
+    for part in msg.walk():
+        # Skip multipart containers
+        if part.is_multipart():
+            continue
+            
+        # Get content disposition
+        content_disposition = part.get("Content-Disposition", "")
+        if not content_disposition:
+            continue
+            
+        # Check if it's an attachment
+        if "attachment" in content_disposition.lower() or "inline" in content_disposition.lower():
+            attachment = {}
+            
+            # Get filename
+            filename = part.get_filename()
+            if filename:
+                # Decode filename if needed
+                decoded_filename = email.header.decode_header(filename)
+                if decoded_filename:
+                    filename_parts = []
+                    for part_data, encoding in decoded_filename:
+                        if isinstance(part_data, bytes):
+                            try:
+                                filename_parts.append(part_data.decode(encoding or "utf-8", errors="ignore"))
+                            except Exception:
+                                filename_parts.append(part_data.decode("utf-8", errors="ignore"))
+                        else:
+                            filename_parts.append(str(part_data))
+                    filename = "".join(filename_parts)
+            
+            attachment["filename"] = filename or ""
+            attachment["content_type"] = part.get_content_type() or ""
+            attachment["content_disposition"] = content_disposition
+            
+            # Get size (if available from Content-Length header)
+            size = 0
+            content_length = part.get("Content-Length")
+            if content_length:
+                try:
+                    size = int(content_length)
+                except (ValueError, TypeError):
+                    pass
+            
+            # If no size from header, try to get from payload
+            if size == 0:
+                try:
+                    payload = part.get_payload(decode=True)
+                    if payload:
+                        size = len(payload)
+                except Exception:
+                    pass
+            
+            attachment["size"] = size
+            attachments.append(attachment)
+    
+    return attachments
+
+
 def parse_email_file(file_path: Path) -> Optional[Dict]:
     """Parse a single .eml file and extract metadata and content."""
     try:
@@ -72,6 +135,8 @@ def parse_email_file(file_path: Path) -> Optional[Dict]:
 
         from_addr = msg.get("From", "")
         to_addrs = msg.get("To", "")
+        cc_addrs = msg.get("Cc", "")
+        bcc_addrs = msg.get("Bcc", "")
         date_str = msg.get("Date", "")
         message_id = msg.get("Message-ID", "")
 
@@ -107,14 +172,20 @@ def parse_email_file(file_path: Path) -> Optional[Dict]:
         if body_text:
             body_text = remove_quoted_reply(body_text)
 
+        # Extract attachments
+        attachments = extract_attachments(msg)
+
         return {
             "subject": subject or "",
             "from": from_addr or "",
             "to": to_addrs or "",
+            "cc": cc_addrs or "",
+            "bcc": bcc_addrs or "",
             "date": date_obj,
             "message_id": message_id or "",
             "body": body_text or "",
             "file_path": str(file_path),
+            "attachments": attachments,
         }
     except Exception as e:
         # Skip files that can't be parsed
