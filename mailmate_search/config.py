@@ -59,3 +59,4 @@ class Config:
 # Global config instance
 config = Config()
 
+

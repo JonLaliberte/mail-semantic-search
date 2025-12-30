@@ -108,3 +108,4 @@ def index_emails(
     print(f"Skipped (already indexed): {total_skipped} emails")
     print(f"Total indexed: {stats_after['total_emails']} emails")
 
+

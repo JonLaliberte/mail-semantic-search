@@ -7,6 +7,10 @@ from pathlib import Path
 from typing import Dict, Iterator, List, Optional
 
 from tqdm import tqdm
+from unquotemail import UnquoteMail
+
+# Initialize unquote parser once for reuse
+_unquote_parser = UnquoteMail()
 
 
 def extract_text_from_part(part) -> Optional[str]:
@@ -33,6 +37,17 @@ def extract_text_from_part(part) -> Optional[str]:
                 except (UnicodeDecodeError, LookupError):
                     return payload.decode("utf-8", errors="ignore")
     return None
+
+
+def remove_quoted_reply(text: str) -> str:
+    """Remove quoted reply sections from email body."""
+    if not text:
+        return text
+    try:
+        return _unquote_parser.parse(text)
+    except Exception:
+        # If parsing fails, return original text
+        return text
 
 
 def parse_email_file(file_path: Path) -> Optional[Dict]:
@@ -87,6 +102,10 @@ def parse_email_file(file_path: Path) -> Optional[Dict]:
                             break
                         except (UnicodeDecodeError, LookupError):
                             pass
+
+        # Remove quoted replies from body text
+        if body_text:
+            body_text = remove_quoted_reply(body_text)
 
         return {
             "subject": subject or "",
@@ -143,4 +162,5 @@ def read_emails_batch(
 
     if show_progress:
         pbar.close()
+
 

@@ -70,3 +70,4 @@ def search_emails(query: str) -> None:
     # Display results
     display_results(results)
 
+
