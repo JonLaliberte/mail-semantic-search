@@ -1,6 +1,5 @@
 """Vector database operations using ChromaDB."""
 
-import hashlib
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -8,6 +7,7 @@ import chromadb
 from chromadb.config import Settings
 
 from mailmate_search.config import config
+from mailmate_search.database import get_file_hash
 
 
 class VectorStore:
@@ -27,7 +27,7 @@ class VectorStore:
 
     def _get_file_hash(self, file_path: str) -> str:
         """Generate a hash for a file path to use as ID."""
-        return hashlib.md5(file_path.encode()).hexdigest()
+        return get_file_hash(file_path)
 
     def is_indexed(self, file_path: str, mtime: Optional[float] = None) -> bool:
         """Check if an email file has already been indexed."""
@@ -170,4 +170,18 @@ class VectorStore:
         """Get statistics about the indexed emails."""
         count = self.collection.count()
         return {"total_emails": count}
+
+    def close(self) -> None:
+        """Close the vector store connection."""
+        # ChromaDB PersistentClient handles cleanup automatically,
+        # but we provide this method for consistency
+        pass
+
+    def __enter__(self):
+        """Context manager entry."""
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit."""
+        self.close()
 

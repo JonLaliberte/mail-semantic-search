@@ -1,5 +1,6 @@
 """Query builder for filtering emails by metadata."""
 
+from collections import defaultdict
 from datetime import datetime
 from typing import Dict, List, Optional
 
@@ -96,13 +97,22 @@ class QueryBuilder:
         cursor.execute(query, params)
         rows = cursor.fetchall()
 
-        # Convert to dicts and get attachments
+        # Convert to dicts
+        email_dicts = [dict(row) for row in rows]
+        
+        # Batch fetch all attachments (fixes N+1 query problem)
+        email_ids = [e["id"] for e in email_dicts]
+        all_attachments = self.db.get_attachments_batch(email_ids)
+        
+        # Group attachments by email_id
+        attachments_by_email: Dict[int, List[Dict]] = defaultdict(list)
+        for att in all_attachments:
+            attachments_by_email[att["email_id"]].append(att)
+        
+        # Add attachments to each email
         results = []
-        for row in rows:
-            email_dict = dict(row)
-            email_id = email_dict["id"]
-            attachments = self.db.get_attachments(email_id)
-            email_dict["attachments"] = attachments
+        for email_dict in email_dicts:
+            email_dict["attachments"] = attachments_by_email.get(email_dict["id"], [])
             results.append(email_dict)
 
         return results
@@ -130,11 +140,22 @@ class QueryBuilder:
         )
         rows = cursor.fetchall()
 
+        # Convert to dicts
+        email_dicts = [dict(row) for row in rows]
+        
+        # Batch fetch all attachments (fixes N+1 query problem)
+        email_ids = [e["id"] for e in email_dicts]
+        all_attachments = self.db.get_attachments_batch(email_ids)
+        
+        # Group attachments by email_id
+        attachments_by_email: Dict[int, List[Dict]] = defaultdict(list)
+        for att in all_attachments:
+            attachments_by_email[att["email_id"]].append(att)
+        
+        # Add attachments to each email
         results = []
-        for row in rows:
-            email_dict = dict(row)
-            email_id = email_dict["id"]
-            email_dict["attachments"] = self.db.get_attachments(email_id)
+        for email_dict in email_dicts:
+            email_dict["attachments"] = attachments_by_email.get(email_dict["id"], [])
             results.append(email_dict)
 
         return results

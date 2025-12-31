@@ -13,6 +13,12 @@ load_dotenv()
 class Config:
     """Application configuration loaded from environment variables."""
 
+    # Default limits for text processing
+    DEFAULT_BODY_PREVIEW_LIMIT = 2000
+    DEFAULT_MAX_ATTACHMENT_TEXT_PER_FILE = 2000
+    DEFAULT_MAX_TOTAL_ATTACHMENT_TEXT = 5000
+    DEFAULT_MAX_FILTERED_SEARCH_LIMIT = 1000
+
     def __init__(self):
         # Embedding model configuration
         self.embedding_model: str = os.getenv(
@@ -40,9 +46,29 @@ class Config:
         database_path = os.getenv("DATABASE_PATH", "./data/database.db")
         self.database_path = Path(database_path)
 
-        # Processing configuration
-        self.batch_size: int = int(os.getenv("BATCH_SIZE", "32"))
+        # Processing configuration with validation
+        batch_size = int(os.getenv("BATCH_SIZE", "32"))
+        if batch_size < 1:
+            batch_size = 32
+        elif batch_size > 500:
+            batch_size = 500
+        self.batch_size: int = batch_size
+
         self.search_results: int = int(os.getenv("SEARCH_RESULTS", "10"))
+
+        # Text processing limits (configurable via env vars)
+        self.body_preview_limit: int = int(
+            os.getenv("BODY_PREVIEW_LIMIT", str(self.DEFAULT_BODY_PREVIEW_LIMIT))
+        )
+        self.max_attachment_text_per_file: int = int(
+            os.getenv("MAX_ATTACHMENT_TEXT_PER_FILE", str(self.DEFAULT_MAX_ATTACHMENT_TEXT_PER_FILE))
+        )
+        self.max_total_attachment_text: int = int(
+            os.getenv("MAX_TOTAL_ATTACHMENT_TEXT", str(self.DEFAULT_MAX_TOTAL_ATTACHMENT_TEXT))
+        )
+        self.max_filtered_search_limit: int = int(
+            os.getenv("MAX_FILTERED_SEARCH_LIMIT", str(self.DEFAULT_MAX_FILTERED_SEARCH_LIMIT))
+        )
 
         # Ensure directories exist
         self.chromadb_path.mkdir(parents=True, exist_ok=True)

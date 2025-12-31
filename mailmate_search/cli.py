@@ -94,6 +94,7 @@ def search(
         from_addr=from_addr,
         to_addr=to_addr,
         subject=subject,
+        subject_like=subject_like,
         date_after=parsed_date_after,
         date_before=parsed_date_before,
         has_attachments=has_attachments_flag,
@@ -131,10 +132,7 @@ def query(
     show_attachments: bool,
 ):
     """Query emails using metadata filters (no semantic search)."""
-    database = Database()
-    query_builder = QueryBuilder(database)
-    
-    # Parse dates
+    # Parse dates before opening database
     parsed_date_after = None
     parsed_date_before = None
     
@@ -143,7 +141,6 @@ def query(
             parsed_date_after = datetime.fromisoformat(date_after)
         except ValueError:
             click.echo(f"Error: Invalid date format for --date-after: {date_after}", err=True)
-            database.close()
             return
     
     if date_before:
@@ -151,7 +148,6 @@ def query(
             parsed_date_before = datetime.fromisoformat(date_before)
         except ValueError:
             click.echo(f"Error: Invalid date format for --date-before: {date_before}", err=True)
-            database.close()
             return
     
     # Handle attachment filter
@@ -161,54 +157,51 @@ def query(
     elif no_attachments:
         has_attachments_flag = False
     
-    results = query_builder.build_query(
-        from_addr=from_addr,
-        to_addr=to_addr,
-        subject=subject,
-        subject_like=subject_like,
-        date_after=parsed_date_after,
-        date_before=parsed_date_before,
-        has_attachments=has_attachments_flag,
-        attachment_type=attachment_type,
-        attachment_name=attachment_name,
-        limit=limit,
-    )
-    
-    # Display results
-    from mailmate_search.search import display_results
-    display_results(results, show_attachments=show_attachments)
-    
-    database.close()
+    with Database() as database:
+        query_builder = QueryBuilder(database)
+        
+        results = query_builder.build_query(
+            from_addr=from_addr,
+            to_addr=to_addr,
+            subject=subject,
+            subject_like=subject_like,
+            date_after=parsed_date_after,
+            date_before=parsed_date_before,
+            has_attachments=has_attachments_flag,
+            attachment_type=attachment_type,
+            attachment_name=attachment_name,
+            limit=limit,
+        )
+        
+        # Display results
+        from mailmate_search.search import display_results
+        display_results(results, show_attachments=show_attachments)
 
 
 @main.command()
 def status():
     """Show indexing status and statistics."""
-    database = Database()
-    vector_store = VectorStore()
-    
-    vector_stats = vector_store.get_stats()
-    db_stats = database.get_stats()
+    with Database() as database, VectorStore() as vector_store:
+        vector_stats = vector_store.get_stats()
+        db_stats = database.get_stats()
 
-    print("MailMate Search Status")
-    print("=" * 40)
-    print(f"Embedding Model: {config.embedding_model}")
-    print(f"MailMate Directory: {config.mailmate_email_dir}")
-    print(f"ChromaDB Path: {config.chromadb_path}")
-    print(f"Database Path: {config.database_path}")
-    print(f"\nChromaDB Statistics:")
-    print(f"  Total Indexed Emails: {vector_stats['total_emails']}")
-    print(f"\nDatabase Statistics:")
-    print(f"  Total Emails: {db_stats['total_emails']}")
-    print(f"  Total Attachments: {db_stats['total_attachments']}")
-    print(f"  Emails with Attachments: {db_stats['emails_with_attachments']}")
-    if db_stats['date_range']['min']:
-        print(f"  Date Range: {db_stats['date_range']['min']} to {db_stats['date_range']['max']}")
-    print(f"\nConfiguration:")
-    print(f"  Batch Size: {config.batch_size}")
-    print(f"  Search Results: {config.search_results}")
-    
-    database.close()
+        print("MailMate Search Status")
+        print("=" * 40)
+        print(f"Embedding Model: {config.embedding_model}")
+        print(f"MailMate Directory: {config.mailmate_email_dir}")
+        print(f"ChromaDB Path: {config.chromadb_path}")
+        print(f"Database Path: {config.database_path}")
+        print(f"\nChromaDB Statistics:")
+        print(f"  Total Indexed Emails: {vector_stats['total_emails']}")
+        print(f"\nDatabase Statistics:")
+        print(f"  Total Emails: {db_stats['total_emails']}")
+        print(f"  Total Attachments: {db_stats['total_attachments']}")
+        print(f"  Emails with Attachments: {db_stats['emails_with_attachments']}")
+        if db_stats['date_range']['min']:
+            print(f"  Date Range: {db_stats['date_range']['min']} to {db_stats['date_range']['max']}")
+        print(f"\nConfiguration:")
+        print(f"  Batch Size: {config.batch_size}")
+        print(f"  Search Results: {config.search_results}")
 
 
 if __name__ == "__main__":

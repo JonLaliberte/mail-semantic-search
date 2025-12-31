@@ -2,6 +2,7 @@
 
 import email
 import email.policy
+import logging
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional
@@ -10,6 +11,8 @@ from tqdm import tqdm
 from unquotemail import UnquoteMail
 
 from mailmate_search.attachment_extractor import extract_text_from_attachment
+
+logger = logging.getLogger(__name__)
 
 # Initialize unquote parser once for reuse
 _unquote_parser = UnquoteMail()
@@ -213,7 +216,7 @@ def parse_email_file(file_path: Path) -> Optional[Dict]:
             "attachments": attachments,
         }
     except Exception as e:
-        # Skip files that can't be parsed
+        logger.warning(f"Failed to parse email file {file_path}: {e}")
         return None
 
 
@@ -237,26 +240,28 @@ def read_emails_batch(
     batch = []
     total_files = sum(1 for _ in directory.rglob("*.eml"))
 
+    pbar = None
     if show_progress:
         pbar = tqdm(total=total_files, desc="Reading emails")
 
-    for file_path in scan_eml_files(directory, show_progress=False):
-        email_data = parse_email_file(file_path)
-        if email_data:
-            batch.append(email_data)
-            if len(batch) >= batch_size:
-                if show_progress:
-                    pbar.update(len(batch))
-                yield batch
-                batch = []
+    try:
+        for file_path in scan_eml_files(directory, show_progress=False):
+            email_data = parse_email_file(file_path)
+            if email_data:
+                batch.append(email_data)
+                if len(batch) >= batch_size:
+                    if pbar:
+                        pbar.update(len(batch))
+                    yield batch
+                    batch = []
 
-    # Yield remaining emails
-    if batch:
-        if show_progress:
-            pbar.update(len(batch))
-        yield batch
-
-    if show_progress:
-        pbar.close()
+        # Yield remaining emails
+        if batch:
+            if pbar:
+                pbar.update(len(batch))
+            yield batch
+    finally:
+        if pbar:
+            pbar.close()
 
 

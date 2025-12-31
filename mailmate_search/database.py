@@ -9,15 +9,28 @@ from typing import Dict, List, Optional, Tuple
 from mailmate_search.config import config
 
 
+def get_file_hash(file_path: str) -> str:
+    """Generate a hash for a file path.
+    
+    This function is used to create unique identifiers for emails based on their
+    file path. The hash is used to link emails between the SQLite database and
+    ChromaDB vector store.
+    """
+    return hashlib.md5(file_path.encode()).hexdigest()
+
+
 class Database:
     """SQLite database for storing email metadata."""
 
     def __init__(self, db_path: Optional[Path] = None):
-        """Initialize database connection and create schema if needed."""
+        """Initialize database connection and create schema if needed.
+        
+        Note: This database is designed for single-threaded use. If multi-threading
+        is needed in the future, implement connection pooling or use thread-local
+        connections instead of sharing a single connection.
+        """
         self.db_path = db_path or config.database_path
-        self.conn = sqlite3.connect(
-            str(self.db_path), check_same_thread=False
-        )
+        self.conn = sqlite3.connect(str(self.db_path))
         self.conn.row_factory = sqlite3.Row
         self._create_schema()
 
@@ -66,11 +79,16 @@ class Database:
         )
 
         # Create indexes
+        # Note: Indexes on to_addrs, cc_addrs, bcc_addrs help with exact matches
+        # and LIKE queries with trailing wildcards (e.g., 'value%')
         indexes = [
             "CREATE INDEX IF NOT EXISTS idx_emails_from ON emails(from_addr)",
             "CREATE INDEX IF NOT EXISTS idx_emails_date ON emails(date)",
             "CREATE INDEX IF NOT EXISTS idx_emails_has_attachments ON emails(has_attachments)",
             "CREATE INDEX IF NOT EXISTS idx_emails_file_hash ON emails(file_hash)",
+            "CREATE INDEX IF NOT EXISTS idx_emails_to_addrs ON emails(to_addrs)",
+            "CREATE INDEX IF NOT EXISTS idx_emails_cc_addrs ON emails(cc_addrs)",
+            "CREATE INDEX IF NOT EXISTS idx_emails_bcc_addrs ON emails(bcc_addrs)",
             "CREATE INDEX IF NOT EXISTS idx_attachments_email_id ON attachments(email_id)",
             "CREATE INDEX IF NOT EXISTS idx_attachments_extension ON attachments(file_extension)",
             "CREATE INDEX IF NOT EXISTS idx_attachments_filename ON attachments(filename)",
@@ -83,7 +101,7 @@ class Database:
 
     def _get_file_hash(self, file_path: str) -> str:
         """Generate a hash for a file path."""
-        return hashlib.md5(file_path.encode()).hexdigest()
+        return get_file_hash(file_path)
 
     def email_exists(self, file_path: str) -> bool:
         """Check if an email with this file path exists."""
@@ -105,8 +123,16 @@ class Database:
         email_data: Dict,
         attachments: List[Dict],
         file_mtime: Optional[float] = None,
+        commit: bool = True,
     ) -> int:
-        """Add an email and its attachments to the database."""
+        """Add an email and its attachments to the database.
+        
+        Args:
+            email_data: Email metadata dictionary
+            attachments: List of attachment dictionaries
+            file_mtime: Optional file modification time
+            commit: Whether to commit after inserting (set False for batch operations)
+        """
         cursor = self.conn.cursor()
 
         file_hash = self._get_file_hash(email_data["file_path"])
@@ -181,14 +207,37 @@ class Database:
                 ),
             )
 
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
         return email_id
+
+    def commit(self) -> None:
+        """Commit the current transaction.
+        
+        Use this after calling add_email with commit=False for batch operations.
+        """
+        self.conn.commit()
 
     def get_attachments(self, email_id: int) -> List[Dict]:
         """Get all attachments for an email."""
         cursor = self.conn.cursor()
         cursor.execute(
             "SELECT * FROM attachments WHERE email_id = ?", (email_id,)
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
+    def get_attachments_batch(self, email_ids: List[int]) -> List[Dict]:
+        """Get all attachments for multiple emails in a single query.
+        
+        This is more efficient than calling get_attachments() for each email.
+        """
+        if not email_ids:
+            return []
+        cursor = self.conn.cursor()
+        placeholders = ",".join("?" * len(email_ids))
+        cursor.execute(
+            f"SELECT * FROM attachments WHERE email_id IN ({placeholders})",
+            email_ids,
         )
         return [dict(row) for row in cursor.fetchall()]
 
