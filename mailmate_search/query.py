@@ -4,6 +4,7 @@ from collections import defaultdict
 from datetime import datetime
 from typing import Dict, List, Optional
 
+from mailmate_search.config import config
 from mailmate_search.database import Database
 
 
@@ -129,19 +130,25 @@ class QueryBuilder:
         return None
 
     def get_emails_by_file_hashes(self, file_hashes: List[str]) -> List[Dict]:
-        """Get emails by their file hashes (for linking with ChromaDB results)."""
+        """Get emails by their file hashes (for linking with ChromaDB results).
+        
+        Issue #6: Batches large lists to avoid SQLite limits.
+        """
         if not file_hashes:
             return []
 
         cursor = self.db.conn.cursor()
-        placeholders = ",".join("?" * len(file_hashes))
-        cursor.execute(
-            f"SELECT * FROM emails WHERE file_hash IN ({placeholders})", file_hashes
-        )
-        rows = cursor.fetchall()
-
-        # Convert to dicts
-        email_dicts = [dict(row) for row in rows]
+        email_dicts = []
+        
+        # Issue #6: Batch large IN clauses
+        max_batch = config.MAX_IN_CLAUSE_SIZE
+        for i in range(0, len(file_hashes), max_batch):
+            batch_hashes = file_hashes[i:i + max_batch]
+            placeholders = ",".join("?" * len(batch_hashes))
+            cursor.execute(
+                f"SELECT * FROM emails WHERE file_hash IN ({placeholders})", batch_hashes
+            )
+            email_dicts.extend([dict(row) for row in cursor.fetchall()])
         
         # Batch fetch all attachments (fixes N+1 query problem)
         email_ids = [e["id"] for e in email_dicts]

@@ -1,5 +1,6 @@
 """Vector database operations using ChromaDB."""
 
+import logging
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -8,6 +9,8 @@ from chromadb.config import Settings
 
 from mailmate_search.config import config
 from mailmate_search.database import get_file_hash
+
+logger = logging.getLogger(__name__)
 
 
 class VectorStore:
@@ -38,8 +41,9 @@ class VectorStore:
                 # If mtime is provided, we could check if file was modified
                 # For now, just check if it exists
                 return True
-        except Exception:
-            pass
+        except chromadb.errors.ChromaError as e:
+            # Issue #11: Log specific ChromaDB errors
+            logger.debug(f"ChromaDB lookup failed for {file_path}: {e}")
         return False
 
     def add_emails(
@@ -91,30 +95,35 @@ class VectorStore:
             # Get attachment types/extensions for filtering
             attachment_types = []
             if attachments:
-                for att in attachments[:10]:  # Limit to first 10 to avoid metadata size issues
+                # Issue #14: Use config constant instead of magic number
+                for att in attachments[:config.MAX_ATTACHMENTS_FOR_METADATA]:
                     filename = att.get("filename", "")
                     if filename:
                         ext = filename.split(".")[-1].lower() if "." in filename else ""
                         if ext and ext not in attachment_types:
                             attachment_types.append(ext)
             
+            # Issue #14: Use config constants instead of magic numbers
+            max_len = config.MAX_CHROMADB_METADATA_LENGTH
             metadata = {
-                "subject": email["subject"][:500],  # ChromaDB has metadata size limits
-                "from": email["from"][:500],
-                "to": email["to"][:500],
+                "subject": email["subject"][:max_len],
+                "from": email["from"][:max_len],
+                "to": email["to"][:max_len],
                 "date": str(email["date"]) if email["date"] else "",
-                "message_id": email["message_id"][:500],
+                "message_id": email["message_id"][:max_len],
                 "file_path": email["file_path"],
                 "attachment_count": attachment_count,
             }
             
             # Add attachment types if any
             if attachment_types:
-                metadata["attachment_types"] = ",".join(attachment_types[:5])  # Limit types
+                metadata["attachment_types"] = ",".join(attachment_types[:config.MAX_ATTACHMENT_TYPES_STORED])
             
             metadatas.append(metadata)
 
-        self.collection.add(
+        # Issue #18: Use upsert() instead of add() to handle re-indexing of modified files
+        # add() fails if IDs already exist, upsert() updates existing entries
+        self.collection.upsert(
             ids=ids,
             embeddings=embeddings,
             documents=texts,

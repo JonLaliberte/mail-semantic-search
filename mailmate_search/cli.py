@@ -1,7 +1,9 @@
 """CLI interface for MailMate search."""
 
+import sqlite3
+import sys
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Tuple
 
 import click
 
@@ -11,6 +13,28 @@ from mailmate_search.index import index_emails
 from mailmate_search.query import QueryBuilder
 from mailmate_search.search import search_emails
 from mailmate_search.vector_store import VectorStore
+
+
+# Issue #13: Standardized error handling helpers
+def parse_date(date_str: Optional[str], option_name: str) -> Tuple[Optional[datetime], Optional[str]]:
+    """Parse a date string, returning (parsed_date, error_message).
+    
+    Returns (None, None) if date_str is None.
+    Returns (datetime, None) on success.
+    Returns (None, error_message) on failure.
+    """
+    if not date_str:
+        return None, None
+    try:
+        return datetime.fromisoformat(date_str), None
+    except ValueError:
+        return None, f"Invalid date format for {option_name}: {date_str}. Use YYYY-MM-DD format."
+
+
+def handle_error(message: str, exit_code: int = 1) -> None:
+    """Display an error message and exit."""
+    click.echo(f"Error: {message}", err=True)
+    sys.exit(exit_code)
 
 
 @click.group()
@@ -33,7 +57,12 @@ def main():
 )
 def index(limit: int, no_skip: bool):
     """Index emails from MailMate directory."""
-    index_emails(limit=limit, skip_indexed=not no_skip, show_progress=True)
+    try:
+        index_emails(limit=limit, skip_indexed=not no_skip, show_progress=True)
+    except sqlite3.Error as e:
+        handle_error(f"Database error: {e}")
+    except Exception as e:
+        handle_error(f"Indexing failed: {e}")
 
 
 @main.command()
@@ -64,23 +93,14 @@ def search(
     show_attachments: bool,
 ):
     """Search for emails using natural language query with optional filters."""
-    # Parse dates
-    parsed_date_after = None
-    parsed_date_before = None
+    # Issue #13: Standardized date parsing with consistent error messages
+    parsed_date_after, error = parse_date(date_after, "--date-after")
+    if error:
+        handle_error(error)
     
-    if date_after:
-        try:
-            parsed_date_after = datetime.fromisoformat(date_after)
-        except ValueError:
-            click.echo(f"Error: Invalid date format for --date-after: {date_after}", err=True)
-            return
-    
-    if date_before:
-        try:
-            parsed_date_before = datetime.fromisoformat(date_before)
-        except ValueError:
-            click.echo(f"Error: Invalid date format for --date-before: {date_before}", err=True)
-            return
+    parsed_date_before, error = parse_date(date_before, "--date-before")
+    if error:
+        handle_error(error)
     
     # Handle attachment filter
     has_attachments_flag = None
@@ -89,19 +109,24 @@ def search(
     elif no_attachments:
         has_attachments_flag = False
     
-    search_emails(
-        query,
-        from_addr=from_addr,
-        to_addr=to_addr,
-        subject=subject,
-        subject_like=subject_like,
-        date_after=parsed_date_after,
-        date_before=parsed_date_before,
-        has_attachments=has_attachments_flag,
-        attachment_type=attachment_type,
-        attachment_name=attachment_name,
-        show_attachments=show_attachments,
-    )
+    try:
+        search_emails(
+            query,
+            from_addr=from_addr,
+            to_addr=to_addr,
+            subject=subject,
+            subject_like=subject_like,
+            date_after=parsed_date_after,
+            date_before=parsed_date_before,
+            has_attachments=has_attachments_flag,
+            attachment_type=attachment_type,
+            attachment_name=attachment_name,
+            show_attachments=show_attachments,
+        )
+    except sqlite3.Error as e:
+        handle_error(f"Database error: {e}")
+    except Exception as e:
+        handle_error(f"Search failed: {e}")
 
 
 @main.command()
@@ -132,23 +157,14 @@ def query(
     show_attachments: bool,
 ):
     """Query emails using metadata filters (no semantic search)."""
-    # Parse dates before opening database
-    parsed_date_after = None
-    parsed_date_before = None
+    # Issue #13: Standardized date parsing with consistent error messages
+    parsed_date_after, error = parse_date(date_after, "--date-after")
+    if error:
+        handle_error(error)
     
-    if date_after:
-        try:
-            parsed_date_after = datetime.fromisoformat(date_after)
-        except ValueError:
-            click.echo(f"Error: Invalid date format for --date-after: {date_after}", err=True)
-            return
-    
-    if date_before:
-        try:
-            parsed_date_before = datetime.fromisoformat(date_before)
-        except ValueError:
-            click.echo(f"Error: Invalid date format for --date-before: {date_before}", err=True)
-            return
+    parsed_date_before, error = parse_date(date_before, "--date-before")
+    if error:
+        handle_error(error)
     
     # Handle attachment filter
     has_attachments_flag = None
@@ -157,51 +173,61 @@ def query(
     elif no_attachments:
         has_attachments_flag = False
     
-    with Database() as database:
-        query_builder = QueryBuilder(database)
-        
-        results = query_builder.build_query(
-            from_addr=from_addr,
-            to_addr=to_addr,
-            subject=subject,
-            subject_like=subject_like,
-            date_after=parsed_date_after,
-            date_before=parsed_date_before,
-            has_attachments=has_attachments_flag,
-            attachment_type=attachment_type,
-            attachment_name=attachment_name,
-            limit=limit,
-        )
-        
-        # Display results
-        from mailmate_search.search import display_results
-        display_results(results, show_attachments=show_attachments)
+    try:
+        with Database() as database:
+            query_builder = QueryBuilder(database)
+            
+            results = query_builder.build_query(
+                from_addr=from_addr,
+                to_addr=to_addr,
+                subject=subject,
+                subject_like=subject_like,
+                date_after=parsed_date_after,
+                date_before=parsed_date_before,
+                has_attachments=has_attachments_flag,
+                attachment_type=attachment_type,
+                attachment_name=attachment_name,
+                limit=limit,
+            )
+            
+            # Display results
+            from mailmate_search.search import display_results
+            display_results(results, show_attachments=show_attachments)
+    except sqlite3.Error as e:
+        handle_error(f"Database error: {e}")
+    except Exception as e:
+        handle_error(f"Query failed: {e}")
 
 
 @main.command()
 def status():
     """Show indexing status and statistics."""
-    with Database() as database, VectorStore() as vector_store:
-        vector_stats = vector_store.get_stats()
-        db_stats = database.get_stats()
+    try:
+        with Database() as database, VectorStore() as vector_store:
+            vector_stats = vector_store.get_stats()
+            db_stats = database.get_stats()
 
-        print("MailMate Search Status")
-        print("=" * 40)
-        print(f"Embedding Model: {config.embedding_model}")
-        print(f"MailMate Directory: {config.mailmate_email_dir}")
-        print(f"ChromaDB Path: {config.chromadb_path}")
-        print(f"Database Path: {config.database_path}")
-        print(f"\nChromaDB Statistics:")
-        print(f"  Total Indexed Emails: {vector_stats['total_emails']}")
-        print(f"\nDatabase Statistics:")
-        print(f"  Total Emails: {db_stats['total_emails']}")
-        print(f"  Total Attachments: {db_stats['total_attachments']}")
-        print(f"  Emails with Attachments: {db_stats['emails_with_attachments']}")
-        if db_stats['date_range']['min']:
-            print(f"  Date Range: {db_stats['date_range']['min']} to {db_stats['date_range']['max']}")
-        print(f"\nConfiguration:")
-        print(f"  Batch Size: {config.batch_size}")
-        print(f"  Search Results: {config.search_results}")
+            print("MailMate Search Status")
+            print("=" * 40)
+            print(f"Embedding Model: {config.embedding_model}")
+            print(f"MailMate Directory: {config.mailmate_email_dir}")
+            print(f"ChromaDB Path: {config.chromadb_path}")
+            print(f"Database Path: {config.database_path}")
+            print(f"\nChromaDB Statistics:")
+            print(f"  Total Indexed Emails: {vector_stats['total_emails']}")
+            print(f"\nDatabase Statistics:")
+            print(f"  Total Emails: {db_stats['total_emails']}")
+            print(f"  Total Attachments: {db_stats['total_attachments']}")
+            print(f"  Emails with Attachments: {db_stats['emails_with_attachments']}")
+            if db_stats['date_range']['min']:
+                print(f"  Date Range: {db_stats['date_range']['min']} to {db_stats['date_range']['max']}")
+            print(f"\nConfiguration:")
+            print(f"  Batch Size: {config.batch_size}")
+            print(f"  Search Results: {config.search_results}")
+    except sqlite3.Error as e:
+        handle_error(f"Database error: {e}")
+    except Exception as e:
+        handle_error(f"Failed to get status: {e}")
 
 
 if __name__ == "__main__":

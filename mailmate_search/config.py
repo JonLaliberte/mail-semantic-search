@@ -18,6 +18,20 @@ class Config:
     DEFAULT_MAX_ATTACHMENT_TEXT_PER_FILE = 2000
     DEFAULT_MAX_TOTAL_ATTACHMENT_TEXT = 5000
     DEFAULT_MAX_FILTERED_SEARCH_LIMIT = 1000
+    
+    # Display constants (Issue #14 - magic numbers)
+    MAX_ATTACHMENTS_DISPLAY = 3
+    MAX_PREVIEW_LENGTH = 200
+    MAX_CHROMADB_METADATA_LENGTH = 500
+    MAX_ATTACHMENT_TYPES_STORED = 5
+    MAX_ATTACHMENTS_FOR_METADATA = 10
+    
+    # Size limits for memory management (Issues #5, #19)
+    DEFAULT_MAX_EMAIL_FILE_SIZE = 50 * 1024 * 1024  # 50MB
+    DEFAULT_MAX_ATTACHMENT_SIZE = 10 * 1024 * 1024  # 10MB for text extraction
+    
+    # Database batch limits (Issue #6)
+    MAX_IN_CLAUSE_SIZE = 500
 
     def __init__(self):
         # Embedding model configuration
@@ -54,7 +68,13 @@ class Config:
             batch_size = 500
         self.batch_size: int = batch_size
 
-        self.search_results: int = int(os.getenv("SEARCH_RESULTS", "10"))
+        # Search results with validation (Issue #10)
+        search_results = int(os.getenv("SEARCH_RESULTS", "10"))
+        if search_results < 1:
+            search_results = 10
+        elif search_results > 10000:
+            search_results = 10000
+        self.search_results: int = search_results
 
         # Text processing limits (configurable via env vars)
         self.body_preview_limit: int = int(
@@ -68,6 +88,14 @@ class Config:
         )
         self.max_filtered_search_limit: int = int(
             os.getenv("MAX_FILTERED_SEARCH_LIMIT", str(self.DEFAULT_MAX_FILTERED_SEARCH_LIMIT))
+        )
+        
+        # Size limits for memory management (Issues #5, #19)
+        self.max_email_file_size: int = int(
+            os.getenv("MAX_EMAIL_FILE_SIZE", str(self.DEFAULT_MAX_EMAIL_FILE_SIZE))
+        )
+        self.max_attachment_size: int = int(
+            os.getenv("MAX_ATTACHMENT_SIZE", str(self.DEFAULT_MAX_ATTACHMENT_SIZE))
         )
 
         # Ensure directories exist

@@ -31,6 +31,10 @@ def display_results(results: List[dict], show_attachments: bool = False) -> None
     print(f"\nFound {len(results)} results:\n")
     print("=" * 80)
 
+    # Issue #14: Use config constants for display limits
+    max_attachments_display = config.MAX_ATTACHMENTS_DISPLAY
+    max_preview_length = config.MAX_PREVIEW_LENGTH
+
     for i, result in enumerate(results, 1):
         score = result.get("similarity", result.get("distance", 0))
         if isinstance(score, (int, float)) and score < 1:
@@ -45,16 +49,16 @@ def display_results(results: List[dict], show_attachments: bool = False) -> None
         attachments = result.get("attachments", [])
         if attachments and show_attachments:
             print(f"Attachments ({len(attachments)}):")
-            for att in attachments[:3]:  # Show first 3
+            for att in attachments[:max_attachments_display]:
                 filename = att.get("filename", "Unknown")
                 size = att.get("size", 0)
                 size_str = f" ({size:,} bytes)" if size > 0 else ""
                 print(f"  - {filename}{size_str}")
-            if len(attachments) > 3:
-                print(f"  ... and {len(attachments) - 3} more")
+            if len(attachments) > max_attachments_display:
+                print(f"  ... and {len(attachments) - max_attachments_display} more")
         
         if result.get("document"):
-            preview = result["document"][:200]
+            preview = result["document"][:max_preview_length]
             print(f"Preview: {preview}...")
         print("-" * 80)
 
@@ -133,24 +137,46 @@ def search_emails(
                 get_file_hash(email["file_path"])
                 for email in filtered_emails
             ]
+            filtered_hashes_set = set(file_hashes)
 
             # Generate query embedding
             query_embedding = embedding_service.embed_query(query)
 
-            # Search vector database with larger limit, then filter by file hashes
+            # Issue #7: Optimize vector search limit based on filtered result count
+            # If we have fewer filtered emails than desired results, search exactly that many
+            # Otherwise, search proportionally more but cap at a reasonable limit
+            desired_results = config.search_results
+            if len(filtered_emails) <= desired_results:
+                # Small result set - search all filtered emails
+                vector_limit = len(filtered_emails)
+            else:
+                # Larger result set - search with some overhead for ranking
+                # Use 3x desired results or filtered count, whichever is smaller
+                vector_limit = min(desired_results * 3, len(filtered_emails), 500)
+
             vector_results = vector_store.search(
-                query_embedding, n_results=min(len(filtered_emails) * 2, 1000)
+                query_embedding, n_results=vector_limit
             )
 
             # Filter vector results to only include filtered emails
-            filtered_hashes_set = set(file_hashes)
             filtered_vector_results = [
                 r for r in vector_results
                 if get_file_hash(r.get("file_path", "")) in filtered_hashes_set
             ]
 
+            # If we didn't get enough results, expand the search
+            if len(filtered_vector_results) < desired_results and vector_limit < len(filtered_emails):
+                # Search with larger limit
+                vector_results = vector_store.search(
+                    query_embedding, n_results=min(len(filtered_emails), 1000)
+                )
+                filtered_vector_results = [
+                    r for r in vector_results
+                    if get_file_hash(r.get("file_path", "")) in filtered_hashes_set
+                ]
+
             # Limit to requested number of results
-            filtered_vector_results = filtered_vector_results[:config.search_results]
+            filtered_vector_results = filtered_vector_results[:desired_results]
 
             # Enrich with database metadata
             results = []

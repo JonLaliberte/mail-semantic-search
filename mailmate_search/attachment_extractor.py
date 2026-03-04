@@ -226,3 +226,5 @@ def _extract_csv_text(data: bytes) -> Optional[str]:
     # Could parse it more intelligently, but for search purposes, raw text is fine
     return _extract_text_file(data)
 
+
+

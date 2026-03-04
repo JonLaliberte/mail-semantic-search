@@ -30,3 +30,5 @@ RUN mkdir -p /app/data/chromadb /app/data/models
 ENTRYPOINT ["python", "-m", "mailmate_search.cli"]
 
 
+
+

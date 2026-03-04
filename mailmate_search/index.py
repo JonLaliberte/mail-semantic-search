@@ -1,9 +1,9 @@
 """Indexing logic for emails."""
 
 import logging
-import os
+from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, List, Optional, TypedDict
 
 from tqdm import tqdm
 
@@ -16,9 +16,39 @@ from mailmate_search.vector_store import VectorStore
 logger = logging.getLogger(__name__)
 
 
-def combine_email_text(email: dict) -> str:
+# Issue #12: TypedDict for better type hints
+class AttachmentDict(TypedDict, total=False):
+    """Type definition for attachment data."""
+    filename: str
+    content_type: str
+    content_disposition: str
+    size: int
+    extracted_text: str
+
+
+class EmailDict(TypedDict, total=False):
+    """Type definition for email data from parser."""
+    subject: str
+    from_: str  # 'from' is reserved, use from_ internally
+    to: str
+    cc: str
+    bcc: str
+    date: Optional[datetime]
+    message_id: str
+    body: str
+    file_path: str
+    attachments: List[AttachmentDict]
+
+
+def combine_email_text(email: Dict[str, Any]) -> str:
     """
     Combine email fields and attachment content into a single text for embedding.
+    
+    Args:
+        email: Email data dictionary (see EmailDict for expected structure)
+    
+    Returns:
+        Combined text string for embedding
     
     Includes:
     - Subject, from address, and body
@@ -127,7 +157,8 @@ def index_emails(
                                 if email_record and email_record.get("file_mtime") == current_mtime:
                                     total_skipped += 1
                                     continue
-                            except Exception as e:
+                            except (OSError, IOError) as e:
+                                # Issue #11: Specific exception for file operations
                                 logger.debug(f"Could not check file mtime for {email['file_path']}: {e}")
                         
                         # Also check ChromaDB
@@ -149,26 +180,42 @@ def index_emails(
                         file_path = Path(email["file_path"])
                         if file_path.exists():
                             email_mtimes[email["file_path"]] = file_path.stat().st_mtime
-                    except Exception as e:
+                    except (OSError, IOError) as e:
+                        # Issue #11: Specific exception for file operations
                         logger.debug(f"Could not get mtime for {email['file_path']}: {e}")
 
-                # Store metadata in SQLite first (batch commit for efficiency)
-                for email in emails_to_index:
-                    attachments = email.get("attachments", [])
-                    file_mtime = email_mtimes.get(email["file_path"])
-                    database.add_email(email, attachments, file_mtime, commit=False)
-                database.commit()  # Single commit for the entire batch
+                # Issue #17: Improved sync between SQLite and ChromaDB
+                # Store in both databases, with proper error handling
+                try:
+                    # Combine email text for embedding first (before any DB writes)
+                    texts = [combine_email_text(email) for email in emails_to_index]
 
-                # Combine email text for embedding
-                texts = [combine_email_text(email) for email in emails_to_index]
+                    # Generate embeddings (before any DB writes)
+                    embeddings = embedding_service.embed_texts(texts)
 
-                # Generate embeddings
-                embeddings = embedding_service.embed_texts(texts)
+                    # Store metadata in SQLite (batch commit for efficiency)
+                    for email in emails_to_index:
+                        attachments = email.get("attachments", [])
+                        file_mtime = email_mtimes.get(email["file_path"])
+                        database.add_email(email, attachments, file_mtime, commit=False)
+                    
+                    # Store in vector database (upsert handles re-indexing)
+                    vector_store.add_emails(emails_to_index, embeddings, texts)
+                    
+                    # Commit SQLite only after ChromaDB succeeds
+                    database.commit()
 
-                # Store in vector database (pass texts so ChromaDB stores the correct document content)
-                vector_store.add_emails(emails_to_index, embeddings, texts)
-
-                total_indexed += len(emails_to_index)
+                    total_indexed += len(emails_to_index)
+                    
+                except Exception as e:
+                    # Issue #11 & #17: Log error and rollback SQLite
+                    logger.error(f"Failed to index batch of {len(emails_to_index)} emails: {e}")
+                    try:
+                        database.conn.rollback()
+                    except Exception:
+                        pass
+                    # Continue with next batch rather than failing entirely
+                    continue
 
                 if pbar:
                     pbar.update(len(emails_to_index))
