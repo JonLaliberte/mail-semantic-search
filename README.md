@@ -74,8 +74,9 @@ All configuration is done via the `.env` file:
 - `index`: Index emails from MailMate directory
   - `--limit N`: Limit indexing to N emails (for testing)
   - `--no-skip`: Re-index all emails even if already indexed (full rebuild behavior)
+  - `--incremental`: Only scan files newer than latest indexed email date
 
-Incremental behavior (default `index`):
+Incremental behavior (`index --incremental`):
 - Finds the most recent indexed email date and scans only files newer than that cutoff.
 - Still writes updates by file path and vector ID, so reruns stay idempotent for changed files in the candidate set.
 

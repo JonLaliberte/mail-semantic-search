@@ -103,6 +103,7 @@ def index_emails(
     limit: Optional[int] = None,
     skip_indexed: bool = True,
     show_progress: bool = True,
+    incremental: bool = False,
 ) -> None:
     """Index all emails from the MailMate directory."""
     email_dir = config.mailmate_email_dir
@@ -131,7 +132,7 @@ def index_emails(
         total_seen = 0
 
         date_cutoff = None
-        if skip_indexed:
+        if incremental and skip_indexed:
             date_cutoff = database.get_latest_indexed_email_date()
             if date_cutoff:
                 print(f"Incremental mode cutoff (newer than): {date_cutoff.isoformat()}")

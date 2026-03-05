@@ -53,12 +53,22 @@ def main():
 @click.option(
     "--no-skip",
     is_flag=True,
-    help="Re-index all emails even if already indexed (disables incremental date cutoff)",
+    help="Re-index all emails even if already indexed",
 )
-def index(limit: int, no_skip: bool):
+@click.option(
+    "--incremental",
+    is_flag=True,
+    help="Only scan files newer than latest indexed email date",
+)
+def index(limit: int, no_skip: bool, incremental: bool):
     """Index emails from MailMate directory."""
     try:
-        index_emails(limit=limit, skip_indexed=not no_skip, show_progress=True)
+        index_emails(
+            limit=limit,
+            skip_indexed=not no_skip,
+            show_progress=True,
+            incremental=incremental,
+        )
     except sqlite3.Error as e:
         handle_error(f"Database error: {e}")
     except (OSError, RuntimeError, ValueError, TypeError) as e:
