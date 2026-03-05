@@ -11,7 +11,7 @@ from tqdm import tqdm
 from mailmate_search.config import config
 from mailmate_search.database import Database, get_file_hash
 from mailmate_search.embedding_service import EmbeddingService
-from mailmate_search.mailmate_reader import read_emails_batch
+from mailmate_search.mailmate_reader import count_eml_files, read_emails_batch
 from mailmate_search.vector_store import VectorStore
 
 logger = logging.getLogger(__name__)
@@ -128,20 +128,40 @@ def index_emails(
 
         total_indexed = 0
         total_skipped = 0
+        total_seen = 0
+
+        date_cutoff = None
+        if skip_indexed:
+            date_cutoff = database.get_latest_indexed_email_date()
+            if date_cutoff:
+                print(f"Incremental mode cutoff (newer than): {date_cutoff.isoformat()}")
+
+        if limit is not None:
+            progress_total = limit
+        else:
+            progress_total = count_eml_files(email_dir, modified_after=date_cutoff)
+            print(f"Candidate emails to process: {progress_total}")
 
         # Process emails in batches
         batch_iter = read_emails_batch(
-            email_dir, batch_size=config.batch_size, show_progress=show_progress
+            email_dir,
+            batch_size=config.batch_size,
+            show_progress=show_progress,
+            modified_after=date_cutoff,
+            total_candidates=progress_total if show_progress else None,
+            max_emails=limit,
         )
 
         pbar = None
         if show_progress:
-            pbar = tqdm(desc="Indexing emails", unit="emails")
+            pbar = tqdm(total=progress_total, desc="Indexing emails", unit="emails")
 
         try:
             for batch in batch_iter:
                 if limit and total_indexed >= limit:
                     break
+
+                total_seen += len(batch)
 
                 # Filter out already indexed emails if requested
                 emails_to_index = []
@@ -219,11 +239,15 @@ def index_emails(
                     continue
 
                 if pbar is not None:
-                    pbar.update(len(emails_to_index))
+                    if limit is not None:
+                        pbar.update(min(len(emails_to_index), max(limit - pbar.n, 0)))
+                    else:
+                        pbar.update(len(batch))
                     pbar.set_postfix(
                         {
                             "indexed": total_indexed,
                             "skipped": total_skipped,
+                            "seen": total_seen,
                         }
                     )
 

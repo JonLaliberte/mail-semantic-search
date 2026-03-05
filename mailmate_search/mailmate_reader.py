@@ -4,7 +4,9 @@ import email
 import email.policy
 import logging
 import re
+import subprocess
 from email.utils import parsedate_to_datetime
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional
 
@@ -274,12 +276,17 @@ def parse_email_file(file_path: Path, base_dir: Optional[Path] = None) -> Option
 
 
 def scan_eml_files(
-    directory: Path, show_progress: bool = True
+    directory: Path, show_progress: bool = True, modified_after: Optional[datetime] = None
 ) -> Iterator[Path]:
     """Recursively scan directory for .eml files.
     
     Uses a generator to avoid loading all file paths into memory at once.
     """
+    if modified_after is not None:
+        # Fast path: use find to filter by modification timestamp.
+        yield from _scan_eml_files_find(directory, modified_after)
+        return
+
     if show_progress:
         # When showing progress, we still need to materialize for count
         eml_files = list(directory.rglob("*.eml"))
@@ -291,8 +298,62 @@ def scan_eml_files(
             yield file_path
 
 
+def _scan_eml_files_find(directory: Path, modified_after: datetime) -> Iterator[Path]:
+    """Use `find` to list .eml files newer than modified_after."""
+    cutoff = modified_after.strftime("%Y-%m-%d %H:%M:%S")
+    command = [
+        "find",
+        str(directory),
+        "-type",
+        "f",
+        "-name",
+        "*.eml",
+        "-newermt",
+        cutoff,
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            logger.debug(f"find command failed for cutoff scan: {result.stderr.strip()}")
+            yield from _scan_eml_files_python(directory, modified_after)
+            return
+
+        for line in result.stdout.splitlines():
+            if line:
+                yield Path(line)
+    except (OSError, ValueError) as e:
+        logger.debug(f"Falling back from find-based scan: {e}")
+        yield from _scan_eml_files_python(directory, modified_after)
+
+
+def _scan_eml_files_python(directory: Path, modified_after: datetime) -> Iterator[Path]:
+    """Fallback mtime-based scan when `find` is unavailable."""
+    cutoff_ts = modified_after.timestamp()
+    for file_path in directory.rglob("*.eml"):
+        try:
+            if file_path.stat().st_mtime > cutoff_ts:
+                yield file_path
+        except OSError:
+            continue
+
+
+def count_eml_files(directory: Path, modified_after: Optional[datetime] = None) -> int:
+    """Count candidate .eml files, optionally filtered by modification date."""
+    return sum(1 for _ in scan_eml_files(directory, show_progress=False, modified_after=modified_after))
+
+
 def read_emails_batch(
-    directory: Path, batch_size: int = 32, show_progress: bool = True
+    directory: Path,
+    batch_size: int = 32,
+    show_progress: bool = True,
+    modified_after: Optional[datetime] = None,
+    total_candidates: Optional[int] = None,
+    max_emails: Optional[int] = None,
 ) -> Iterator[List[Dict]]:
     """Read emails in batches for efficient processing.
     
@@ -304,27 +365,43 @@ def read_emails_batch(
 
     pbar = None
     if show_progress:
-        # Issue #4: Don't pre-count files - use unknown total progress bar
-        pbar = tqdm(desc="Reading emails", unit=" emails")
+        pbar = tqdm(total=total_candidates, desc="Reading emails", unit=" emails")
 
     try:
-        for file_path in scan_eml_files(directory, show_progress=False):
+        for file_path in scan_eml_files(directory, show_progress=False, modified_after=modified_after):
             email_data = parse_email_file(file_path, base_dir=directory)
             if email_data:
                 batch.append(email_data)
                 if len(batch) >= batch_size:
-                    processed_count += len(batch)
+                    batch_to_yield = batch
+                    if max_emails is not None:
+                        remaining = max_emails - processed_count
+                        if remaining <= 0:
+                            break
+                        if len(batch) > remaining:
+                            batch_to_yield = batch[:remaining]
+                    processed_count += len(batch_to_yield)
                     if pbar is not None:
-                        pbar.update(len(batch))
-                    yield batch
+                        pbar.update(len(batch_to_yield))
+                    yield batch_to_yield
+                    if max_emails is not None and processed_count >= max_emails:
+                        break
                     batch = []
 
         # Yield remaining emails
         if batch:
-            processed_count += len(batch)
+            batch_to_yield = batch
+            if max_emails is not None:
+                remaining = max_emails - processed_count
+                if remaining > 0 and len(batch) > remaining:
+                    batch_to_yield = batch[:remaining]
+                elif remaining <= 0:
+                    batch_to_yield = []
+            processed_count += len(batch_to_yield)
             if pbar is not None:
-                pbar.update(len(batch))
-            yield batch
+                pbar.update(len(batch_to_yield))
+            if batch_to_yield:
+                yield batch_to_yield
     finally:
         if pbar is not None:
             pbar.close()

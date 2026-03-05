@@ -76,6 +76,7 @@ class Database:
         self.conn.execute("PRAGMA foreign_keys = ON")
         
         self._create_schema()
+        self._migrate_message_id_uniqueness()
 
     def _create_schema(self) -> None:
         """Create database schema if it doesn't exist."""
@@ -86,7 +87,7 @@ class Database:
             """
             CREATE TABLE IF NOT EXISTS emails (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                message_id TEXT UNIQUE,
+                message_id TEXT,
                 file_path TEXT UNIQUE NOT NULL,
                 file_hash TEXT NOT NULL,
                 subject TEXT,
@@ -141,6 +142,99 @@ class Database:
             cursor.execute(index_sql)
 
         self.conn.commit()
+
+    def _migrate_message_id_uniqueness(self) -> None:
+        """Migrate legacy schema where message_id was globally unique.
+
+        Some real-world mail stores contain duplicate Message-ID values across
+        different folders or accounts. We key indexing by file_path, so message_id
+        must not be globally unique.
+        """
+        cursor = self.conn.cursor()
+        cursor.execute("PRAGMA table_info(emails)")
+        columns = [dict(row) for row in cursor.fetchall()]
+
+        # If table has no message_id column or no uniqueness marker, nothing to do.
+        message_id_cols = [col for col in columns if col["name"] == "message_id"]
+        if not message_id_cols:
+            return
+        if not bool(message_id_cols[0].get("pk", 0)) and message_id_cols[0].get("notnull", 0) == 0:
+            # PRAGMA table_info does not expose UNIQUE directly, so detect via indexes below.
+            pass
+
+        if not self._has_unique_index_on_column("emails", "message_id"):
+            return
+
+        logger.info("Migrating emails schema to remove unique constraint on message_id")
+
+        # Rebuild emails table without UNIQUE(message_id), preserving IDs for FK integrity.
+        self.conn.execute("PRAGMA foreign_keys = OFF")
+        try:
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS emails_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    message_id TEXT,
+                    file_path TEXT UNIQUE NOT NULL,
+                    file_hash TEXT NOT NULL,
+                    subject TEXT,
+                    from_addr TEXT,
+                    to_addrs TEXT,
+                    cc_addrs TEXT,
+                    bcc_addrs TEXT,
+                    date DATETIME,
+                    body_preview TEXT,
+                    has_attachments BOOLEAN DEFAULT 0,
+                    attachment_count INTEGER DEFAULT 0,
+                    file_size INTEGER,
+                    indexed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    file_mtime REAL
+                )
+                """
+            )
+            cursor.execute(
+                """
+                INSERT INTO emails_new (
+                    id, message_id, file_path, file_hash, subject, from_addr,
+                    to_addrs, cc_addrs, bcc_addrs, date, body_preview,
+                    has_attachments, attachment_count, file_size, indexed_at, file_mtime
+                )
+                SELECT
+                    id, message_id, file_path, file_hash, subject, from_addr,
+                    to_addrs, cc_addrs, bcc_addrs, date, body_preview,
+                    has_attachments, attachment_count, file_size, indexed_at, file_mtime
+                FROM emails
+                """
+            )
+            cursor.execute("DROP TABLE emails")
+            cursor.execute("ALTER TABLE emails_new RENAME TO emails")
+            self.conn.commit()
+        finally:
+            self.conn.execute("PRAGMA foreign_keys = ON")
+
+        # Recreate non-unique indexes that are dropped with table rebuild.
+        self._create_schema()
+
+    def _has_unique_index_on_column(self, table_name: str, column_name: str) -> bool:
+        """Return True if table has a unique index exactly on column_name."""
+        cursor = self.conn.cursor()
+        cursor.execute(f"PRAGMA index_list({table_name})")
+        indexes = cursor.fetchall()
+
+        for idx in indexes:
+            unique = idx["unique"] if isinstance(idx, sqlite3.Row) else idx[2]
+            idx_name = idx["name"] if isinstance(idx, sqlite3.Row) else idx[1]
+            if not unique:
+                continue
+            cursor.execute(f"PRAGMA index_info({idx_name})")
+            columns = cursor.fetchall()
+            col_names = [
+                col["name"] if isinstance(col, sqlite3.Row) else col[2]
+                for col in columns
+            ]
+            if col_names == [column_name]:
+                return True
+        return False
 
     def _get_file_hash(self, file_path: str) -> str:
         """Generate a hash for a file path."""
@@ -227,7 +321,7 @@ class Database:
                     indexed_at = excluded.indexed_at
                 """,
                 (
-                    email_data.get("message_id", ""),
+                    email_data.get("message_id") or None,
                     email_data["file_path"],
                     file_hash,
                     email_data.get("subject", ""),
@@ -365,6 +459,21 @@ class Database:
         }
 
         return stats
+
+    def get_latest_indexed_email_date(self) -> Optional[datetime]:
+        """Get the most recent parsed email date in the index."""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT MAX(date) AS max_date FROM emails WHERE date IS NOT NULL")
+        row = cursor.fetchone()
+        if not row or not row["max_date"]:
+            return None
+
+        date_str = str(row["max_date"])
+        try:
+            return datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+        except ValueError:
+            logger.debug(f"Could not parse latest indexed email date: {date_str}")
+            return None
 
     def close(self) -> None:
         """Close database connection."""

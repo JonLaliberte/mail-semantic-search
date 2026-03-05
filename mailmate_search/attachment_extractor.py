@@ -7,6 +7,7 @@ from zipfile import BadZipFile
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+logging.getLogger("pdfminer").setLevel(logging.ERROR)
 
 # Maximum attachment size to process (10MB)
 MAX_ATTACHMENT_SIZE = 10 * 1024 * 1024
@@ -39,6 +40,7 @@ def extract_text_from_attachment(
     # Determine file type from content_type and filename
     content_type_lower = content_type.lower() if content_type else ""
     filename_lower = filename.lower() if filename else ""
+    is_zip_like = attachment_data[:2] == b"PK"
     
     # PDF files
     if "pdf" in content_type_lower or filename_lower.endswith(".pdf"):
@@ -50,6 +52,9 @@ def extract_text_from_attachment(
         or "msword" in content_type_lower
         or filename_lower.endswith(".docx")
     ):
+        if not is_zip_like:
+            logger.debug(f"Skipping non-OOXML Word attachment: {filename} ({content_type})")
+            return None
         return _extract_docx_text(attachment_data)
     
     # Excel files (.xlsx)
@@ -59,6 +64,9 @@ def extract_text_from_attachment(
         or filename_lower.endswith(".xlsx")
         or filename_lower.endswith(".xlsm")
     ):
+        if not is_zip_like:
+            logger.debug(f"Skipping non-OOXML Excel attachment: {filename} ({content_type})")
+            return None
         return _extract_xlsx_text(attachment_data)
     
     # PowerPoint files (.pptx)
@@ -68,6 +76,9 @@ def extract_text_from_attachment(
         or filename_lower.endswith(".pptx")
         or filename_lower.endswith(".pptm")
     ):
+        if not is_zip_like:
+            logger.debug(f"Skipping non-OOXML PowerPoint attachment: {filename} ({content_type})")
+            return None
         return _extract_pptx_text(attachment_data)
     
     # Plain text files
@@ -148,6 +159,12 @@ def _extract_xlsx_text(data: bytes) -> Optional[str]:
             warnings.filterwarnings(
                 "ignore",
                 message="Data Validation extension is not supported and will be removed",
+                category=UserWarning,
+                module=r"openpyxl\.worksheet\._reader",
+            )
+            warnings.filterwarnings(
+                "ignore",
+                message="Unknown extension is not supported and will be removed",
                 category=UserWarning,
                 module=r"openpyxl\.worksheet\._reader",
             )

@@ -53,7 +53,7 @@ def main():
 @click.option(
     "--no-skip",
     is_flag=True,
-    help="Re-index all emails even if already indexed",
+    help="Re-index all emails even if already indexed (disables incremental date cutoff)",
 )
 def index(limit: int, no_skip: bool):
     """Index emails from MailMate directory."""

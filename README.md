@@ -48,7 +48,7 @@ AI-powered semantic search for MailMate emails using local embeddings and vector
    ```bash
    docker compose run --rm mailmate-search index
    ```
-   This may take several hours for large email collections (35GB = ~700k emails).
+   This may take several hours for large email collections (35GB = ~700k emails). Indexing shows percent complete by default.
 
 6. **Search your emails:**
    ```bash
@@ -73,7 +73,11 @@ All configuration is done via the `.env` file:
 
 - `index`: Index emails from MailMate directory
   - `--limit N`: Limit indexing to N emails (for testing)
-  - `--no-skip`: Re-index all emails even if already indexed
+  - `--no-skip`: Re-index all emails even if already indexed (full rebuild behavior)
+
+Incremental behavior (default `index`):
+- Finds the most recent indexed email date and scans only files newer than that cutoff.
+- Still writes updates by file path and vector ID, so reruns stay idempotent for changed files in the candidate set.
 
 - `search "query"`: Search for emails matching the query
 
@@ -109,6 +113,7 @@ The system will automatically download and use the new model.
 - This is normal for large collections (several hours for 35GB)
 - The process can be interrupted and resumed
 - Already indexed emails are skipped on subsequent runs
+- Use `--no-skip` when you want a full rebuild across all files
 
 ## License
 
