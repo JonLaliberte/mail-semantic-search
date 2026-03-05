@@ -96,7 +96,7 @@ def _extract_pdf_text(data: bytes) -> Optional[str]:
     except ImportError:
         logger.warning("pdfplumber not available, cannot extract PDF text")
         return None
-    except Exception as e:
+    except (OSError, ValueError, TypeError) as e:
         logger.warning(f"Failed to extract text from PDF: {e}")
         return None
 
@@ -125,7 +125,7 @@ def _extract_docx_text(data: bytes) -> Optional[str]:
     except ImportError:
         logger.warning("python-docx not available, cannot extract Word document text")
         return None
-    except Exception as e:
+    except (OSError, ValueError, TypeError, AttributeError) as e:
         logger.warning(f"Failed to extract text from Word document: {e}")
         return None
 
@@ -156,7 +156,7 @@ def _extract_xlsx_text(data: bytes) -> Optional[str]:
     except ImportError:
         logger.warning("openpyxl not available, cannot extract Excel text")
         return None
-    except Exception as e:
+    except (OSError, ValueError, TypeError, KeyError) as e:
         logger.warning(f"Failed to extract text from Excel file: {e}")
         return None
 
@@ -192,7 +192,7 @@ def _extract_pptx_text(data: bytes) -> Optional[str]:
     except ImportError:
         logger.warning("python-pptx not available, cannot extract PowerPoint text")
         return None
-    except Exception as e:
+    except (OSError, ValueError, TypeError, AttributeError) as e:
         logger.warning(f"Failed to extract text from PowerPoint file: {e}")
         return None
 
@@ -212,12 +212,8 @@ def _extract_text_file(data: bytes) -> Optional[str]:
         except (UnicodeDecodeError, LookupError):
             continue
     
-    # Fallback: decode with errors replaced
-    try:
-        return data.decode("utf-8", errors="replace")
-    except Exception as e:
-        logger.warning(f"Failed to decode text file: {e}")
-        return None
+    # Fallback: decode with replacement never raises for utf-8.
+    return data.decode("utf-8", errors="replace")
 
 
 def _extract_csv_text(data: bytes) -> Optional[str]:

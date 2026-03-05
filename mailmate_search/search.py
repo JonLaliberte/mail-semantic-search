@@ -18,7 +18,7 @@ def format_date(date_str: str) -> str:
         # Try parsing ISO format
         dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
         return dt.strftime("%Y-%m-%d %H:%M")
-    except Exception:
+    except (ValueError, TypeError):
         return date_str
 
 

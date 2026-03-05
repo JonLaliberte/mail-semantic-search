@@ -11,7 +11,7 @@ from mailmate_search.config import config
 from mailmate_search.database import Database
 from mailmate_search.index import index_emails
 from mailmate_search.query import QueryBuilder
-from mailmate_search.search import search_emails
+from mailmate_search.search import display_results, search_emails
 from mailmate_search.vector_store import VectorStore
 
 
@@ -61,7 +61,7 @@ def index(limit: int, no_skip: bool):
         index_emails(limit=limit, skip_indexed=not no_skip, show_progress=True)
     except sqlite3.Error as e:
         handle_error(f"Database error: {e}")
-    except Exception as e:
+    except (OSError, RuntimeError, ValueError, TypeError) as e:
         handle_error(f"Indexing failed: {e}")
 
 
@@ -125,7 +125,7 @@ def search(
         )
     except sqlite3.Error as e:
         handle_error(f"Database error: {e}")
-    except Exception as e:
+    except (OSError, RuntimeError, ValueError, TypeError) as e:
         handle_error(f"Search failed: {e}")
 
 
@@ -191,11 +191,10 @@ def query(
             )
             
             # Display results
-            from mailmate_search.search import display_results
             display_results(results, show_attachments=show_attachments)
     except sqlite3.Error as e:
         handle_error(f"Database error: {e}")
-    except Exception as e:
+    except (OSError, RuntimeError, ValueError, TypeError) as e:
         handle_error(f"Query failed: {e}")
 
 
@@ -226,7 +225,7 @@ def status():
             print(f"  Search Results: {config.search_results}")
     except sqlite3.Error as e:
         handle_error(f"Database error: {e}")
-    except Exception as e:
+    except (OSError, RuntimeError, ValueError, TypeError) as e:
         handle_error(f"Failed to get status: {e}")
 
 

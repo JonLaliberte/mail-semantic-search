@@ -3,6 +3,7 @@
 import email
 import email.policy
 import logging
+import re
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional
@@ -96,7 +97,7 @@ def extract_attachments(msg, extract_text: bool = True) -> List[Dict]:
                         if isinstance(part_data, bytes):
                             try:
                                 filename_parts.append(part_data.decode(encoding or "utf-8", errors="ignore"))
-                            except Exception:
+                            except (UnicodeDecodeError, LookupError, ValueError):
                                 filename_parts.append(part_data.decode("utf-8", errors="ignore"))
                         else:
                             filename_parts.append(str(part_data))
@@ -182,8 +183,9 @@ def parse_email_file(file_path: Path, base_dir: Optional[Path] = None) -> Option
         except OSError as e:
             logger.debug(f"Could not stat file {file_path}: {e}")
         
+        # Parse from file object to avoid allocating an extra full-file bytes copy.
         with open(file_path, "rb") as f:
-            msg = email.message_from_bytes(f.read(), policy=email.policy.default)
+            msg = email.message_from_binary_file(f, policy=email.policy.default)
 
         # Extract headers
         subject = msg.get("Subject", "")
@@ -227,8 +229,6 @@ def parse_email_file(file_path: Path, base_dir: Optional[Path] = None) -> Option
                             charset = part.get_content_charset() or "utf-8"
                             html_content = payload.decode(charset, errors="ignore")
                             # Basic HTML tag removal
-                            import re
-
                             body_text = re.sub(r"<[^>]+>", "", html_content)
                             break
                         except (UnicodeDecodeError, LookupError):
@@ -253,7 +253,7 @@ def parse_email_file(file_path: Path, base_dir: Optional[Path] = None) -> Option
             "file_path": str(file_path),
             "attachments": attachments,
         }
-    except Exception as e:
+    except (OSError, ValueError, TypeError, email.errors.MessageError) as e:
         logger.warning(f"Failed to parse email file {file_path}: {e}")
         return None
 
@@ -294,7 +294,7 @@ def read_emails_batch(
 
     try:
         for file_path in scan_eml_files(directory, show_progress=False):
-            email_data = parse_email_file(file_path)
+            email_data = parse_email_file(file_path, base_dir=directory)
             if email_data:
                 batch.append(email_data)
                 if len(batch) >= batch_size:

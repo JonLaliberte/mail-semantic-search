@@ -1,6 +1,7 @@
 """Indexing logic for emails."""
 
 import logging
+import sqlite3
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, TypedDict
@@ -207,12 +208,12 @@ def index_emails(
 
                     total_indexed += len(emails_to_index)
                     
-                except Exception as e:
+                except (sqlite3.Error, OSError, RuntimeError, ValueError, TypeError) as e:
                     # Issue #11 & #17: Log error and rollback SQLite
                     logger.error(f"Failed to index batch of {len(emails_to_index)} emails: {e}")
                     try:
                         database.conn.rollback()
-                    except Exception:
+                    except sqlite3.Error:
                         pass
                     # Continue with next batch rather than failing entirely
                     continue
