@@ -39,21 +39,23 @@ AI-powered semantic search for MailMate emails using local embeddings and vector
    - Set `MAILMATE_EMAIL_DIR` to your MailMate messages directory
    - Adjust other settings as needed
 
-4. **Build and start the container:**
+4. **Build the container image:**
    ```bash
-   docker-compose up --build -d
+   docker compose build
    ```
 
 5. **Index your emails:**
    ```bash
-   docker-compose exec mailmate-search index
+   docker compose run --rm mailmate-search index
    ```
    This may take several hours for large email collections (35GB = ~700k emails).
 
 6. **Search your emails:**
    ```bash
-   docker-compose exec mailmate-search search "your query here"
+   docker compose run --rm mailmate-search search "your query here"
    ```
+
+Because this project is a CLI container (not a long-running daemon), `docker compose up -d` will start, print help, and exit. Use `docker compose run --rm ...` for commands.
 
 ## Configuration
 
@@ -89,7 +91,7 @@ For 35GB of email data (~700,000 emails):
 
 To switch embedding models:
 1. Update `EMBEDDING_MODEL` in `.env`
-2. Re-run indexing: `docker-compose exec mailmate-search index --no-skip`
+2. Re-run indexing: `docker compose run --rm mailmate-search index --no-skip`
 
 The system will automatically download and use the new model.
 

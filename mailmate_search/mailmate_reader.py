@@ -9,7 +9,17 @@ from pathlib import Path
 from typing import Dict, Iterator, List, Optional
 
 from tqdm import tqdm
-from unquotemail import UnquoteMail
+try:
+    # Older unquotemail releases
+    from unquotemail import UnquoteMail  # type: ignore[attr-defined]
+except ImportError:
+    UnquoteMail = None  # type: ignore[assignment]
+
+try:
+    # Newer unquotemail releases
+    from unquotemail import Unquote  # type: ignore[attr-defined]
+except ImportError:
+    Unquote = None  # type: ignore[assignment]
 
 from mailmate_search.attachment_extractor import extract_text_from_attachment
 from mailmate_search.config import config
@@ -17,8 +27,8 @@ from mailmate_search.database import validate_file_path
 
 logger = logging.getLogger(__name__)
 
-# Initialize unquote parser once for reuse
-_unquote_parser = UnquoteMail()
+# Initialize parser once when legacy API is available
+_unquote_parser = UnquoteMail() if UnquoteMail is not None else None
 
 
 def extract_text_from_part(part) -> Optional[str]:
@@ -52,7 +62,12 @@ def remove_quoted_reply(text: str) -> str:
     if not text:
         return text
     try:
-        return _unquote_parser.parse(text)
+        if _unquote_parser is not None:
+            return _unquote_parser.parse(text)
+        if Unquote is not None:
+            # New API expects html/text constructor args and parses on init by default.
+            return Unquote(html=None, text=text).get_text()
+        return text
     except (ValueError, TypeError, AttributeError) as e:
         # Issue #11: Log specific exceptions instead of swallowing silently
         logger.debug(f"Could not parse quoted reply: {e}")
@@ -299,7 +314,7 @@ def read_emails_batch(
                 batch.append(email_data)
                 if len(batch) >= batch_size:
                     processed_count += len(batch)
-                    if pbar:
+                    if pbar is not None:
                         pbar.update(len(batch))
                     yield batch
                     batch = []
@@ -307,11 +322,11 @@ def read_emails_batch(
         # Yield remaining emails
         if batch:
             processed_count += len(batch)
-            if pbar:
+            if pbar is not None:
                 pbar.update(len(batch))
             yield batch
     finally:
-        if pbar:
+        if pbar is not None:
             pbar.close()
         if show_progress:
             logger.info(f"Processed {processed_count} emails")

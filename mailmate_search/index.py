@@ -218,7 +218,7 @@ def index_emails(
                     # Continue with next batch rather than failing entirely
                     continue
 
-                if pbar:
+                if pbar is not None:
                     pbar.update(len(emails_to_index))
                     pbar.set_postfix(
                         {
@@ -230,7 +230,7 @@ def index_emails(
         except KeyboardInterrupt:
             print("\nIndexing interrupted by user")
         finally:
-            if pbar:
+            if pbar is not None:
                 pbar.close()
 
         # Get final stats
