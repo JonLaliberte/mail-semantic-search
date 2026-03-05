@@ -85,6 +85,7 @@ def _extract_pdf_text(data: bytes) -> Optional[str]:
     """Extract text from PDF using pdfplumber."""
     try:
         import pdfplumber
+        from pdfplumber.utils.exceptions import PdfminerException
         
         with pdfplumber.open(io.BytesIO(data)) as pdf:
             text_parts = []
@@ -95,6 +96,10 @@ def _extract_pdf_text(data: bytes) -> Optional[str]:
             return "\n".join(text_parts) if text_parts else None
     except ImportError:
         logger.warning("pdfplumber not available, cannot extract PDF text")
+        return None
+    except PdfminerException as e:
+        # Common for encrypted/password-protected PDFs or malformed documents.
+        logger.warning(f"Failed to extract text from PDF (pdfminer): {e}")
         return None
     except (OSError, ValueError, TypeError) as e:
         logger.warning(f"Failed to extract text from PDF: {e}")

@@ -167,7 +167,7 @@ def extract_attachments(msg, extract_text: bool = True) -> List[Dict]:
                     )
                     if extracted_text:
                         attachment["extracted_text"] = extracted_text
-                except (UnicodeDecodeError, ValueError, OSError) as e:
+                except (UnicodeDecodeError, ValueError, OSError, TypeError, RuntimeError) as e:
                     # Issue #11: Log specific exceptions
                     logger.debug(f"Text extraction failed for {attachment.get('filename', 'unknown')}: {e}")
             

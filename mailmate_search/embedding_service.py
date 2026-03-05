@@ -7,13 +7,27 @@ from sentence_transformers import SentenceTransformer
 
 from mailmate_search.config import config
 
+# Human-friendly aliases documented in README -> canonical HF model IDs.
+MODEL_ALIASES = {
+    "BGE-base-en-v1.5": "BAAI/bge-base-en-v1.5",
+    "BGE-small-en-v1.5": "BAAI/bge-small-en-v1.5",
+    "nomic-embed-text-v1": "nomic-ai/nomic-embed-text-v1",
+    "all-MiniLM-L6-v2": "sentence-transformers/all-MiniLM-L6-v2",
+}
+
+
+def resolve_model_name(model_name: str) -> str:
+    """Resolve documented aliases to canonical Hugging Face model IDs."""
+    return MODEL_ALIASES.get(model_name, model_name)
+
 
 class EmbeddingService:
     """Service for generating embeddings using sentence-transformers."""
 
     def __init__(self, model_name: Optional[str] = None):
         """Initialize the embedding service with a model."""
-        self.model_name = model_name or config.embedding_model
+        configured_model = model_name or config.embedding_model
+        self.model_name = resolve_model_name(configured_model)
 
         # Set cache directory for models
         cache_dir = str(config.model_cache_dir.absolute())
