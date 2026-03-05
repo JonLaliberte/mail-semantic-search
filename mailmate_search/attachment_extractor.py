@@ -2,6 +2,7 @@
 
 import io
 import logging
+import warnings
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -99,7 +100,7 @@ def _extract_pdf_text(data: bytes) -> Optional[str]:
         return None
     except PdfminerException as e:
         # Common for encrypted/password-protected PDFs or malformed documents.
-        logger.warning(f"Failed to extract text from PDF (pdfminer): {e}")
+        logger.debug(f"Failed to extract text from PDF (pdfminer): {e}")
         return None
     except (OSError, ValueError, TypeError) as e:
         logger.warning(f"Failed to extract text from PDF: {e}")
@@ -139,25 +140,33 @@ def _extract_xlsx_text(data: bytes) -> Optional[str]:
     """Extract text from Excel file using openpyxl."""
     try:
         from openpyxl import load_workbook
-        
-        workbook = load_workbook(io.BytesIO(data), data_only=True, read_only=True)
-        text_parts = []
-        
-        for sheet_name in workbook.sheetnames:
-            sheet = workbook[sheet_name]
-            sheet_text = [f"Sheet: {sheet_name}"]
+
+        # Ignore known openpyxl warning about unsupported data validation extensions.
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message="Data Validation extension is not supported and will be removed",
+                category=UserWarning,
+                module=r"openpyxl\.worksheet\._reader",
+            )
+            workbook = load_workbook(io.BytesIO(data), data_only=True, read_only=True)
+            text_parts = []
             
-            for row in sheet.iter_rows(values_only=True):
-                row_values = [str(cell) if cell is not None else "" for cell in row]
-                row_text = " | ".join(row_values).strip()
-                if row_text:
-                    sheet_text.append(row_text)
+            for sheet_name in workbook.sheetnames:
+                sheet = workbook[sheet_name]
+                sheet_text = [f"Sheet: {sheet_name}"]
+                
+                for row in sheet.iter_rows(values_only=True):
+                    row_values = [str(cell) if cell is not None else "" for cell in row]
+                    row_text = " | ".join(row_values).strip()
+                    if row_text:
+                        sheet_text.append(row_text)
+                
+                if len(sheet_text) > 1:  # More than just the sheet name
+                    text_parts.append("\n".join(sheet_text))
             
-            if len(sheet_text) > 1:  # More than just the sheet name
-                text_parts.append("\n".join(sheet_text))
-        
-        workbook.close()
-        return "\n\n".join(text_parts) if text_parts else None
+            workbook.close()
+            return "\n\n".join(text_parts) if text_parts else None
     except ImportError:
         logger.warning("openpyxl not available, cannot extract Excel text")
         return None
