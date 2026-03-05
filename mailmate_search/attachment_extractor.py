@@ -3,6 +3,7 @@
 import io
 import logging
 import warnings
+from zipfile import BadZipFile
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -140,6 +141,7 @@ def _extract_xlsx_text(data: bytes) -> Optional[str]:
     """Extract text from Excel file using openpyxl."""
     try:
         from openpyxl import load_workbook
+        from openpyxl.utils.exceptions import InvalidFileException
 
         # Ignore known openpyxl warning about unsupported data validation extensions.
         with warnings.catch_warnings():
@@ -167,6 +169,10 @@ def _extract_xlsx_text(data: bytes) -> Optional[str]:
             
             workbook.close()
             return "\n\n".join(text_parts) if text_parts else None
+    except (BadZipFile, InvalidFileException) as e:
+        # Common when attachments are mislabeled/corrupted spreadsheet files.
+        logger.debug(f"Failed to extract text from Excel file (invalid archive): {e}")
+        return None
     except ImportError:
         logger.warning("openpyxl not available, cannot extract Excel text")
         return None
