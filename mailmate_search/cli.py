@@ -1,5 +1,6 @@
 """CLI interface for MailMate search."""
 
+import logging
 import sqlite3
 import sys
 from datetime import datetime
@@ -11,8 +12,15 @@ from mailmate_search.config import config
 from mailmate_search.database import Database
 from mailmate_search.index import index_emails
 from mailmate_search.query import QueryBuilder
+from mailmate_search.runtime_logging import (
+    configure_logging,
+    configure_runtime_diagnostics,
+    get_runtime_log_path,
+)
 from mailmate_search.search import display_results, search_emails
 from mailmate_search.vector_store import VectorStore
+
+logger = logging.getLogger(__name__)
 
 
 # Issue #13: Standardized error handling helpers
@@ -31,9 +39,18 @@ def parse_date(date_str: Optional[str], option_name: str) -> Tuple[Optional[date
         return None, f"Invalid date format for {option_name}: {date_str}. Use YYYY-MM-DD format."
 
 
-def handle_error(message: str, exit_code: int = 1) -> None:
+def handle_error(
+    message: str,
+    exit_code: int = 1,
+    *,
+    log_exception: bool = False,
+) -> None:
     """Display an error message and exit."""
+    if log_exception:
+        logger.exception(message)
     click.echo(f"Error: {message}", err=True)
+    if log_exception:
+        click.echo(f"Details logged to: {get_runtime_log_path()}", err=True)
     sys.exit(exit_code)
 
 
@@ -41,7 +58,8 @@ def handle_error(message: str, exit_code: int = 1) -> None:
 @click.version_option(version="0.1.0")
 def main():
     """MailMate AI Search Tool - Semantic search for your emails."""
-    pass
+    configure_logging()
+    configure_runtime_diagnostics()
 
 
 @main.command()
@@ -70,9 +88,9 @@ def index(limit: int, no_skip: bool, incremental: bool):
             incremental=incremental,
         )
     except sqlite3.Error as e:
-        handle_error(f"Database error: {e}")
+        handle_error(f"Database error: {e}", log_exception=True)
     except (OSError, RuntimeError, ValueError, TypeError) as e:
-        handle_error(f"Indexing failed: {e}")
+        handle_error(f"Indexing failed: {e}", log_exception=True)
 
 
 @main.command()
@@ -88,6 +106,16 @@ def index(limit: int, no_skip: bool, incremental: bool):
 @click.option("--attachment-type", help="Filter by attachment file extension (e.g., pdf, jpg)")
 @click.option("--attachment-name", help="Filter by attachment filename (partial match)")
 @click.option("--show-attachments", is_flag=True, help="Show attachment details in results")
+@click.option(
+    "--auto-filters/--no-auto-filters",
+    default=None,
+    help="Enable/disable local natural-language filter extraction",
+)
+@click.option(
+    "--rerank/--no-rerank",
+    default=None,
+    help="Enable/disable local cross-encoder reranking",
+)
 def search(
     query: str,
     from_addr: Optional[str],
@@ -101,6 +129,8 @@ def search(
     attachment_type: Optional[str],
     attachment_name: Optional[str],
     show_attachments: bool,
+    auto_filters: Optional[bool],
+    rerank: Optional[bool],
 ):
     """Search for emails using natural language query with optional filters."""
     # Issue #13: Standardized date parsing with consistent error messages
@@ -132,11 +162,13 @@ def search(
             attachment_type=attachment_type,
             attachment_name=attachment_name,
             show_attachments=show_attachments,
+            auto_filters=auto_filters,
+            rerank=rerank,
         )
     except sqlite3.Error as e:
-        handle_error(f"Database error: {e}")
+        handle_error(f"Database error: {e}", log_exception=True)
     except (OSError, RuntimeError, ValueError, TypeError) as e:
-        handle_error(f"Search failed: {e}")
+        handle_error(f"Search failed: {e}", log_exception=True)
 
 
 @main.command()
@@ -203,9 +235,9 @@ def query(
             # Display results
             display_results(results, show_attachments=show_attachments)
     except sqlite3.Error as e:
-        handle_error(f"Database error: {e}")
+        handle_error(f"Database error: {e}", log_exception=True)
     except (OSError, RuntimeError, ValueError, TypeError) as e:
-        handle_error(f"Query failed: {e}")
+        handle_error(f"Query failed: {e}", log_exception=True)
 
 
 @main.command()
@@ -234,9 +266,9 @@ def status():
             print(f"  Batch Size: {config.batch_size}")
             print(f"  Search Results: {config.search_results}")
     except sqlite3.Error as e:
-        handle_error(f"Database error: {e}")
+        handle_error(f"Database error: {e}", log_exception=True)
     except (OSError, RuntimeError, ValueError, TypeError) as e:
-        handle_error(f"Failed to get status: {e}")
+        handle_error(f"Failed to get status: {e}", log_exception=True)
 
 
 if __name__ == "__main__":

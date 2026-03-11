@@ -12,6 +12,21 @@ logging.getLogger("pdfminer").setLevel(logging.ERROR)
 # Maximum attachment size to process (10MB)
 MAX_ATTACHMENT_SIZE = 10 * 1024 * 1024
 
+# Canonical document MIME types (avoid parsing OOXML internal part types).
+WORD_MIME_TYPES = {
+    "application/msword",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.ms-word.document.macroenabled.12",
+}
+POWERPOINT_MIME_TYPES = {
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "application/vnd.openxmlformats-officedocument.presentationml.slideshow",
+    "application/vnd.openxmlformats-officedocument.presentationml.template",
+    "application/vnd.ms-powerpoint.presentation.macroenabled.12",
+    "application/vnd.ms-powerpoint.slideshow.macroenabled.12",
+    "application/vnd.ms-powerpoint.template.macroenabled.12",
+}
+
 
 def extract_text_from_attachment(
     attachment_data: bytes, content_type: str, filename: str
@@ -48,9 +63,10 @@ def extract_text_from_attachment(
     
     # Word documents (.docx)
     if (
-        "wordprocessingml" in content_type_lower
-        or "msword" in content_type_lower
+        content_type_lower in WORD_MIME_TYPES
+        or "wordprocessingml.document" in content_type_lower
         or filename_lower.endswith(".docx")
+        or filename_lower.endswith(".docm")
     ):
         if not is_zip_like:
             logger.debug(f"Skipping non-OOXML Word attachment: {filename} ({content_type})")
@@ -71,10 +87,14 @@ def extract_text_from_attachment(
     
     # PowerPoint files (.pptx)
     if (
-        "presentationml" in content_type_lower
+        content_type_lower in POWERPOINT_MIME_TYPES
+        or "presentationml.presentation" in content_type_lower
+        or "presentationml.slideshow" in content_type_lower
         or "powerpoint" in content_type_lower
         or filename_lower.endswith(".pptx")
         or filename_lower.endswith(".pptm")
+        or filename_lower.endswith(".ppsx")
+        or filename_lower.endswith(".ppsm")
     ):
         if not is_zip_like:
             logger.debug(f"Skipping non-OOXML PowerPoint attachment: {filename} ({content_type})")
@@ -144,7 +164,7 @@ def _extract_docx_text(data: bytes) -> Optional[str]:
         logger.warning("python-docx not available, cannot extract Word document text")
         return None
     except (OSError, ValueError, TypeError, AttributeError) as e:
-        logger.warning(f"Failed to extract text from Word document: {e}")
+        logger.debug(f"Failed to extract text from Word document: {e}")
         return None
 
 
@@ -167,6 +187,12 @@ def _extract_xlsx_text(data: bytes) -> Optional[str]:
                 message="Unknown extension is not supported and will be removed",
                 category=UserWarning,
                 module=r"openpyxl\.worksheet\._reader",
+            )
+            warnings.filterwarnings(
+                "ignore",
+                message="Workbook contains no default style, apply openpyxl's default",
+                category=UserWarning,
+                module=r"openpyxl\.styles\.stylesheet",
             )
             workbook = load_workbook(io.BytesIO(data), data_only=True, read_only=True)
             text_parts = []
@@ -230,7 +256,7 @@ def _extract_pptx_text(data: bytes) -> Optional[str]:
         logger.warning("python-pptx not available, cannot extract PowerPoint text")
         return None
     except (OSError, ValueError, TypeError, AttributeError) as e:
-        logger.warning(f"Failed to extract text from PowerPoint file: {e}")
+        logger.debug(f"Failed to extract text from PowerPoint file: {e}")
         return None
 
 

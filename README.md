@@ -68,6 +68,20 @@ All configuration is done via the `.env` file:
 - `MODEL_CACHE_DIR`: Where to cache downloaded models
 - `BATCH_SIZE`: Number of emails to process at once (default: 32)
 - `SEARCH_RESULTS`: Number of results to return (default: 10)
+- `QUERY_PARSER_ENABLED`: Enable local LLM query-to-filter parsing (default: `false`)
+- `QUERY_PARSER_ENDPOINT`: Local parser endpoint (default: `http://localhost:11434/api/generate`)
+- `QUERY_PARSER_MODEL`: Local parser model name (default: `llama3.1:8b`)
+- `QUERY_PARSER_TIMEOUT_SECONDS`: Timeout for parser call in seconds (default: `8`)
+- `RERANK_ENABLED`: Enable local cross-encoder reranking (default: `false`)
+- `RERANKER_MODEL`: Cross-encoder model (default: `cross-encoder/ms-marco-MiniLM-L-6-v2`)
+- `RERANK_MAX_CANDIDATES`: Candidate pool size before rerank (default: `50`)
+- `LOG_PATH`: Runtime log file for internal warnings/errors/diagnostics (default: `./data/logs/mailmate-search.error.log`)
+- `LOG_LEVEL`: App log verbosity written to `LOG_PATH` (default: `INFO`)
+- `LOG_THIRD_PARTY_LEVEL`: Third-party library log verbosity written to `LOG_PATH` (default: `WARNING`)
+- `LOG_MAX_BYTES`: Log rotation size threshold in bytes (default: `10485760`)
+- `LOG_BACKUP_COUNT`: Number of rotated log files to retain (default: `5`)
+
+Normal CLI output stays in the terminal. Internal warnings, diagnostics, and traceback dumps are written to `LOG_PATH`.
 
 ## Commands
 
@@ -81,6 +95,8 @@ Incremental behavior (`index --incremental`):
 - Still writes updates by file path and vector ID, so reruns stay idempotent for changed files in the candidate set.
 
 - `search "query"`: Search for emails matching the query
+  - `--auto-filters/--no-auto-filters`: Override local parser toggle per query
+  - `--rerank/--no-rerank`: Override local reranker toggle per query
 
 - `status`: Show indexing status and statistics
 
@@ -115,6 +131,10 @@ The system will automatically download and use the new model.
 - The process can be interrupted and resumed
 - Already indexed emails are skipped on subsequent runs
 - Use `--no-skip` when you want a full rebuild across all files
+
+**Warnings/errors while indexing:**
+- Progress bars and high-level status updates stay in the terminal
+- Internal warnings, diagnostics, and traceback dumps go to `LOG_PATH`
 
 ## License
 

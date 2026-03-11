@@ -1,7 +1,11 @@
 """Indexing logic for emails."""
 
+import faulthandler
 import logging
+import os
 import sqlite3
+import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, TypedDict
@@ -11,10 +15,133 @@ from tqdm import tqdm
 from mailmate_search.config import config
 from mailmate_search.database import Database, get_file_hash
 from mailmate_search.embedding_service import EmbeddingService
-from mailmate_search.mailmate_reader import count_eml_files, read_emails_batch
+from mailmate_search.mailmate_reader import (
+    count_eml_files,
+    get_reader_status,
+    read_emails_batch,
+)
+from mailmate_search.runtime_logging import dump_runtime_traceback
 from mailmate_search.vector_store import VectorStore
 
 logger = logging.getLogger(__name__)
+
+
+class IndexDiagnostics:
+    """Emit periodic indexing heartbeats and dump stacks on prolonged stalls."""
+
+    def __init__(self, enabled: bool, heartbeat_seconds: int, stall_dump_seconds: int):
+        self.enabled = enabled
+        self.heartbeat_seconds = max(heartbeat_seconds, 1)
+        self.stall_dump_seconds = max(stall_dump_seconds, 0)
+        self._lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self.batch_number = 0
+        self.phase = "startup"
+        self.total_seen = 0
+        self.total_indexed = 0
+        self.total_skipped = 0
+        self.current_files: List[str] = []
+        self.last_progress_time = time.monotonic()
+        self.last_dump_time = 0.0
+
+    def start(self) -> None:
+        if not self.enabled or self._thread is not None:
+            return
+        self._thread = threading.Thread(
+            target=self._run,
+            name="index-diagnostics",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1)
+
+    def start_batch(self, batch_number: int, batch: List[Dict[str, Any]]) -> None:
+        with self._lock:
+            self.batch_number = batch_number
+            self.phase = "filtering_batch"
+            self.current_files = [email["file_path"] for email in batch[:2]]
+
+    def set_phase(self, phase: str, emails: Optional[List[Dict[str, Any]]] = None) -> None:
+        with self._lock:
+            self.phase = phase
+            if emails is not None:
+                self.current_files = [email["file_path"] for email in emails[:2]]
+
+    def mark_progress(self, total_seen: int, total_indexed: int, total_skipped: int) -> None:
+        with self._lock:
+            self.total_seen = total_seen
+            self.total_indexed = total_indexed
+            self.total_skipped = total_skipped
+            self.last_progress_time = time.monotonic()
+
+    def emit(self, message: str, level: int = logging.INFO) -> None:
+        logger.log(level, "[diagnostic] %s", message)
+
+    def _snapshot(self) -> Dict[str, Any]:
+        with self._lock:
+            return {
+                "batch_number": self.batch_number,
+                "phase": self.phase,
+                "total_seen": self.total_seen,
+                "total_indexed": self.total_indexed,
+                "total_skipped": self.total_skipped,
+                "current_files": list(self.current_files),
+                "reader_status": get_reader_status(),
+                "last_progress_time": self.last_progress_time,
+                "last_dump_time": self.last_dump_time,
+            }
+
+    def _record_dump_time(self, now: float) -> None:
+        with self._lock:
+            self.last_dump_time = now
+
+    def _run(self) -> None:
+        while not self._stop_event.wait(self.heartbeat_seconds):
+            snapshot = self._snapshot()
+            files = [Path(path).name for path in snapshot["current_files"] if path]
+            reader_current = snapshot["reader_status"].get("current_file")
+            if reader_current:
+                reader_name = Path(reader_current).name
+                if reader_name not in files:
+                    files.append(reader_name)
+            current_files = ", ".join(files) or "n/a"
+            self.emit(
+                "phase={phase} batch={batch} seen={seen} indexed={indexed} skipped={skipped} files={files}".format(
+                    phase=snapshot["phase"],
+                    batch=snapshot["batch_number"],
+                    seen=snapshot["total_seen"],
+                    indexed=snapshot["total_indexed"],
+                    skipped=snapshot["total_skipped"],
+                    files=current_files,
+                )
+            )
+
+            if self.stall_dump_seconds <= 0:
+                continue
+
+            now = time.monotonic()
+            stalled_for = now - snapshot["last_progress_time"]
+            if stalled_for < self.stall_dump_seconds:
+                continue
+            if now - snapshot["last_dump_time"] < self.stall_dump_seconds:
+                continue
+
+            self.emit(
+                f"No indexing progress for {int(stalled_for)}s during phase={snapshot['phase']}; dumping all thread tracebacks.",
+                level=logging.WARNING,
+            )
+            if reader_current:
+                self.emit(
+                    f"Likely stuck while parsing file: {Path(reader_current).name}",
+                    level=logging.WARNING,
+                )
+            dump_runtime_traceback()
+            self._record_dump_time(now)
 
 
 # Issue #12: TypedDict for better type hints
@@ -109,17 +236,29 @@ def index_emails(
     email_dir = config.mailmate_email_dir
 
     if not email_dir.exists():
-        print(f"Error: MailMate email directory not found: {email_dir}")
-        print("Please set MAILMATE_EMAIL_DIR in your .env file")
-        return
+        raise FileNotFoundError(
+            f"MailMate email directory not found: {email_dir}. "
+            "Please set MAILMATE_EMAIL_DIR in your .env file."
+        )
 
     print(f"Indexing emails from: {email_dir}")
     print(f"Using embedding model: {config.embedding_model}")
     print(f"Batch size: {config.batch_size}")
+    if config.index_runtime_diagnostics:
+        logger.info(
+            "[diagnostic] Runtime diagnostics enabled for PID %s. "
+            "Send SIGUSR1 to dump all thread tracebacks.",
+            os.getpid(),
+        )
 
     # Initialize services with context managers for proper cleanup
     with Database() as database, VectorStore() as vector_store:
         embedding_service = EmbeddingService()
+        diagnostics = IndexDiagnostics(
+            enabled=config.index_runtime_diagnostics,
+            heartbeat_seconds=config.index_heartbeat_seconds,
+            stall_dump_seconds=config.index_stall_dump_seconds,
+        )
 
         # Get stats before indexing
         stats_before = vector_store.get_stats()
@@ -156,12 +295,15 @@ def index_emails(
         pbar = None
         if show_progress:
             pbar = tqdm(total=progress_total, desc="Indexing emails", unit="emails")
+        diagnostics.mark_progress(total_seen=0, total_indexed=0, total_skipped=0)
+        diagnostics.start()
 
         try:
-            for batch in batch_iter:
+            for batch_number, batch in enumerate(batch_iter, start=1):
                 if limit and total_indexed >= limit:
                     break
 
+                diagnostics.start_batch(batch_number, batch)
                 total_seen += len(batch)
 
                 # Filter out already indexed emails if requested
@@ -192,10 +334,17 @@ def index_emails(
                 else:
                     emails_to_index = batch
 
+                diagnostics.mark_progress(
+                    total_seen=total_seen,
+                    total_indexed=total_indexed,
+                    total_skipped=total_skipped,
+                )
+
                 if not emails_to_index:
                     continue
 
                 # Get file modification times
+                diagnostics.set_phase("collecting_mtimes", emails_to_index)
                 email_mtimes = {}
                 for email in emails_to_index:
                     try:
@@ -210,24 +359,34 @@ def index_emails(
                 # Store in both databases, with proper error handling
                 try:
                     # Combine email text for embedding first (before any DB writes)
+                    diagnostics.set_phase("building_embedding_text", emails_to_index)
                     texts = [combine_email_text(email) for email in emails_to_index]
 
                     # Generate embeddings (before any DB writes)
+                    diagnostics.set_phase("embedding_batch", emails_to_index)
                     embeddings = embedding_service.embed_texts(texts)
 
                     # Store metadata in SQLite (batch commit for efficiency)
+                    diagnostics.set_phase("writing_sqlite_batch", emails_to_index)
                     for email in emails_to_index:
                         attachments = email.get("attachments", [])
                         file_mtime = email_mtimes.get(email["file_path"])
                         database.add_email(email, attachments, file_mtime, commit=False)
                     
                     # Store in vector database (upsert handles re-indexing)
+                    diagnostics.set_phase("upserting_chromadb_batch", emails_to_index)
                     vector_store.add_emails(emails_to_index, embeddings, texts)
                     
                     # Commit SQLite only after ChromaDB succeeds
+                    diagnostics.set_phase("committing_sqlite_batch", emails_to_index)
                     database.commit()
 
                     total_indexed += len(emails_to_index)
+                    diagnostics.mark_progress(
+                        total_seen=total_seen,
+                        total_indexed=total_indexed,
+                        total_skipped=total_skipped,
+                    )
                     
                 except (sqlite3.Error, OSError, RuntimeError, ValueError, TypeError) as e:
                     # Issue #11 & #17: Log error and rollback SQLite
@@ -255,6 +414,7 @@ def index_emails(
         except KeyboardInterrupt:
             print("\nIndexing interrupted by user")
         finally:
+            diagnostics.stop()
             if pbar is not None:
                 pbar.close()
 

@@ -32,6 +32,16 @@ class Config:
     
     # Database batch limits (Issue #6)
     MAX_IN_CLAUSE_SIZE = 500
+    DEFAULT_QUERY_PARSER_TIMEOUT_SECONDS = 8
+    DEFAULT_RERANK_MAX_CANDIDATES = 50
+    DEFAULT_RERANK_MAX_TEXT_CHARS = 1200
+    DEFAULT_INDEX_HEARTBEAT_SECONDS = 60
+    DEFAULT_INDEX_STALL_DUMP_SECONDS = 300
+    DEFAULT_QUOTE_STRIP_TIMEOUT_SECONDS = 2.0
+    DEFAULT_QUOTE_STRIP_MAX_CHARS = 50000
+    DEFAULT_QUOTE_STRIP_MAX_LINES = 1500
+    DEFAULT_LOG_MAX_BYTES = 10 * 1024 * 1024
+    DEFAULT_LOG_BACKUP_COUNT = 5
 
     def __init__(self):
         # Embedding model configuration
@@ -60,6 +70,20 @@ class Config:
         database_path = os.getenv("DATABASE_PATH", "./data/database.db")
         self.database_path = Path(database_path)
 
+        # Runtime logging
+        log_path = os.getenv("LOG_PATH", "./data/logs/mailmate-search.error.log")
+        self.log_path = Path(log_path)
+        self.log_level: str = os.getenv("LOG_LEVEL", "INFO").upper()
+        self.log_third_party_level: str = os.getenv(
+            "LOG_THIRD_PARTY_LEVEL", "WARNING"
+        ).upper()
+        self.log_max_bytes: int = int(
+            os.getenv("LOG_MAX_BYTES", str(self.DEFAULT_LOG_MAX_BYTES))
+        )
+        self.log_backup_count: int = int(
+            os.getenv("LOG_BACKUP_COUNT", str(self.DEFAULT_LOG_BACKUP_COUNT))
+        )
+
         # Processing configuration with validation
         batch_size = int(os.getenv("BATCH_SIZE", "32"))
         if batch_size < 1:
@@ -75,6 +99,81 @@ class Config:
         elif search_results > 10000:
             search_results = 10000
         self.search_results: int = search_results
+
+        # Phase 1: local query parser configuration
+        self.query_parser_enabled: bool = self._parse_bool(
+            os.getenv("QUERY_PARSER_ENABLED", "false")
+        )
+        self.query_parser_endpoint: str = os.getenv(
+            "QUERY_PARSER_ENDPOINT", "http://localhost:11434/api/generate"
+        )
+        self.query_parser_model: str = os.getenv(
+            "QUERY_PARSER_MODEL", "llama3.1:8b"
+        )
+        self.query_parser_timeout_seconds: int = int(
+            os.getenv(
+                "QUERY_PARSER_TIMEOUT_SECONDS",
+                str(self.DEFAULT_QUERY_PARSER_TIMEOUT_SECONDS),
+            )
+        )
+
+        # Phase 2: local cross-encoder reranker configuration
+        self.rerank_enabled: bool = self._parse_bool(
+            os.getenv("RERANK_ENABLED", "false")
+        )
+        self.reranker_model: str = os.getenv(
+            "RERANKER_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2"
+        )
+        self.rerank_max_candidates: int = int(
+            os.getenv(
+                "RERANK_MAX_CANDIDATES", str(self.DEFAULT_RERANK_MAX_CANDIDATES)
+            )
+        )
+        self.reranker_max_text_chars: int = int(
+            os.getenv(
+                "RERANK_MAX_TEXT_CHARS", str(self.DEFAULT_RERANK_MAX_TEXT_CHARS)
+            )
+        )
+
+        # Indexing diagnostics
+        self.index_runtime_diagnostics: bool = self._parse_bool(
+            os.getenv("INDEX_RUNTIME_DIAGNOSTICS", "true")
+        )
+        self.index_heartbeat_seconds: int = int(
+            os.getenv(
+                "INDEX_HEARTBEAT_SECONDS",
+                str(self.DEFAULT_INDEX_HEARTBEAT_SECONDS),
+            )
+        )
+        self.index_stall_dump_seconds: int = int(
+            os.getenv(
+                "INDEX_STALL_DUMP_SECONDS",
+                str(self.DEFAULT_INDEX_STALL_DUMP_SECONDS),
+            )
+        )
+
+        # Quoted-reply stripping safeguards
+        self.quote_strip_enabled: bool = self._parse_bool(
+            os.getenv("QUOTE_STRIP_ENABLED", "true")
+        )
+        self.quote_strip_timeout_seconds: float = float(
+            os.getenv(
+                "QUOTE_STRIP_TIMEOUT_SECONDS",
+                str(self.DEFAULT_QUOTE_STRIP_TIMEOUT_SECONDS),
+            )
+        )
+        self.quote_strip_max_chars: int = int(
+            os.getenv(
+                "QUOTE_STRIP_MAX_CHARS",
+                str(self.DEFAULT_QUOTE_STRIP_MAX_CHARS),
+            )
+        )
+        self.quote_strip_max_lines: int = int(
+            os.getenv(
+                "QUOTE_STRIP_MAX_LINES",
+                str(self.DEFAULT_QUOTE_STRIP_MAX_LINES),
+            )
+        )
 
         # Text processing limits (configurable via env vars)
         self.body_preview_limit: int = int(
@@ -102,6 +201,12 @@ class Config:
         self.chromadb_path.mkdir(parents=True, exist_ok=True)
         self.model_cache_dir.mkdir(parents=True, exist_ok=True)
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
+        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    @staticmethod
+    def _parse_bool(value: str) -> bool:
+        """Parse bool-like env strings safely."""
+        return value.strip().lower() in {"1", "true", "yes", "on"}
 
     def __repr__(self) -> str:
         return (

@@ -1,11 +1,17 @@
 """Embedding service using sentence-transformers."""
 
+from contextlib import ExitStack, redirect_stdout
+import logging
 import os
 from typing import List, Optional
 
 from sentence_transformers import SentenceTransformer
+from transformers.utils import logging as transformers_logging
 
 from mailmate_search.config import config
+from mailmate_search.runtime_logging import LoggerWriter, redirect_stderr_to_logger
+
+logger = logging.getLogger(__name__)
 
 # Human-friendly aliases documented in README -> canonical HF model IDs.
 MODEL_ALIASES = {
@@ -33,13 +39,22 @@ class EmbeddingService:
         cache_dir = str(config.model_cache_dir.absolute())
         os.environ["TRANSFORMERS_CACHE"] = cache_dir
         os.environ["HF_HOME"] = cache_dir
+        os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+        os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
+        transformers_logging.set_verbosity_error()
 
-        print(f"Loading embedding model: {self.model_name}")
-        print(f"Model cache directory: {cache_dir}")
-        self.model = SentenceTransformer(
-            self.model_name, cache_folder=cache_dir
+        logger.info("Loading embedding model: %s", self.model_name)
+        logger.info("Model cache directory: %s", cache_dir)
+        with ExitStack() as stack:
+            stack.enter_context(redirect_stdout(LoggerWriter(logger, logging.WARNING)))
+            stack.enter_context(redirect_stderr_to_logger(logger, logging.WARNING))
+            self.model = SentenceTransformer(
+                self.model_name, cache_folder=cache_dir
+            )
+        logger.info(
+            "Model loaded successfully. Embedding dimension: %s",
+            self.model.get_sentence_embedding_dimension(),
         )
-        print(f"Model loaded successfully. Embedding dimension: {self.model.get_sentence_embedding_dimension()}")
 
     def embed_texts(self, texts: List[str]) -> List[List[float]]:
         """Generate embeddings for a list of texts."""

@@ -3,12 +3,14 @@
 import email
 import email.policy
 import logging
+import multiprocessing as mp
 import re
 import subprocess
+import threading
 from email.utils import parsedate_to_datetime
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterator, List, Optional
+from typing import Dict, Iterator, List, Optional, Tuple
 
 from tqdm import tqdm
 try:
@@ -31,6 +33,171 @@ logger = logging.getLogger(__name__)
 
 # Initialize parser once when legacy API is available
 _unquote_parser = UnquoteMail() if UnquoteMail is not None else None
+_reader_status_lock = threading.Lock()
+_reader_status: Dict[str, Optional[str]] = {
+    "current_file": None,
+    "last_file": None,
+}
+
+
+def _update_reader_status(current_file: Optional[Path] = None, last_file: Optional[Path] = None) -> None:
+    with _reader_status_lock:
+        if current_file is not None:
+            _reader_status["current_file"] = str(current_file)
+        if last_file is not None:
+            _reader_status["last_file"] = str(last_file)
+
+
+def clear_reader_status() -> None:
+    """Clear currently tracked parse file details."""
+    with _reader_status_lock:
+        _reader_status["current_file"] = None
+
+
+def get_reader_status() -> Dict[str, Optional[str]]:
+    """Return current reader diagnostics for indexing heartbeats."""
+    with _reader_status_lock:
+        return dict(_reader_status)
+
+
+def _has_reply_markers(text: str) -> bool:
+    lower = text.lower()
+    return (
+        ">" in text
+        or "wrote:" in lower
+        or "original message" in lower
+        or "-----" in text
+        or "\nfrom:" in lower
+    )
+
+
+def _should_strip_quotes(text: str) -> Tuple[bool, Optional[str]]:
+    if not config.quote_strip_enabled:
+        return False, "disabled"
+    if len(text) > config.quote_strip_max_chars:
+        return False, f"body_too_large_chars={len(text)}"
+    line_count = text.count("\n") + 1
+    if line_count > config.quote_strip_max_lines:
+        return False, f"body_too_large_lines={line_count}"
+    if not _has_reply_markers(text):
+        return False, "no_reply_markers"
+    return True, None
+
+
+def _run_unquote(text: str, parser) -> str:
+    if parser is not None:
+        return parser.parse(text)
+    if Unquote is not None:
+        return Unquote(html=None, text=text).get_text()
+    return text
+
+
+def _quote_strip_worker(conn) -> None:
+    parser = UnquoteMail() if UnquoteMail is not None else None
+    while True:
+        try:
+            payload = conn.recv()
+        except (EOFError, BrokenPipeError):
+            break
+
+        if payload is None:
+            break
+
+        try:
+            stripped = _run_unquote(payload, parser)
+            try:
+                conn.send((True, stripped))
+            except BrokenPipeError:
+                break
+        except (ValueError, TypeError, AttributeError, RuntimeError) as e:
+            try:
+                conn.send((False, str(e)))
+            except BrokenPipeError:
+                break
+    try:
+        conn.close()
+    except OSError:
+        pass
+
+
+class QuoteStripper:
+    """Run quoted-reply stripping in a dedicated worker process."""
+
+    def __init__(self, timeout_seconds: float):
+        self.timeout_seconds = max(timeout_seconds, 0.1)
+        self._ctx = mp.get_context("spawn")
+        self._conn = None
+        self._process = None
+
+    def _ensure_worker(self) -> bool:
+        if self._process is not None and self._process.is_alive() and self._conn is not None:
+            return True
+
+        parent_conn, child_conn = self._ctx.Pipe()
+        process = self._ctx.Process(target=_quote_strip_worker, args=(child_conn,), daemon=True)
+        process.start()
+        child_conn.close()
+        self._conn = parent_conn
+        self._process = process
+        return True
+
+    def _restart_worker(self) -> None:
+        self.close()
+        self._ensure_worker()
+
+    def strip(self, text: str, file_path: Optional[Path] = None) -> str:
+        if UnquoteMail is None and Unquote is None:
+            return text
+
+        try:
+            self._ensure_worker()
+            self._conn.send(text)
+            if not self._conn.poll(self.timeout_seconds):
+                if file_path is not None:
+                    logger.warning(
+                        "Quoted-reply stripping timed out after %.1fs for %s; using original body.",
+                        self.timeout_seconds,
+                        file_path.name,
+                    )
+                self._restart_worker()
+                return text
+
+            ok, payload = self._conn.recv()
+            if ok:
+                return payload
+
+            if file_path is not None:
+                logger.debug(
+                    f"Quoted-reply stripping failed for {file_path.name}: {payload}"
+                )
+            return text
+        except (BrokenPipeError, EOFError, OSError) as e:
+            if file_path is not None:
+                logger.debug(f"Quote-strip worker failure for {file_path.name}: {e}")
+            self._restart_worker()
+            return text
+
+    def close(self) -> None:
+        if self._conn is not None:
+            try:
+                self._conn.send(None)
+            except (BrokenPipeError, EOFError, OSError):
+                pass
+            try:
+                self._conn.close()
+            except OSError:
+                pass
+            self._conn = None
+
+        if self._process is not None:
+            self._process.join(timeout=0.2)
+            if self._process.is_alive():
+                self._process.terminate()
+                self._process.join(timeout=1.0)
+            self._process = None
+
+
+_quote_stripper = QuoteStripper(config.quote_strip_timeout_seconds)
 
 
 def extract_text_from_part(part) -> Optional[str]:
@@ -59,18 +226,23 @@ def extract_text_from_part(part) -> Optional[str]:
     return None
 
 
-def remove_quoted_reply(text: str) -> str:
+def remove_quoted_reply(text: str, file_path: Optional[Path] = None) -> str:
     """Remove quoted reply sections from email body."""
     if not text:
         return text
-    try:
-        if _unquote_parser is not None:
-            return _unquote_parser.parse(text)
-        if Unquote is not None:
-            # New API expects html/text constructor args and parses on init by default.
-            return Unquote(html=None, text=text).get_text()
+
+    should_strip, reason = _should_strip_quotes(text)
+    if not should_strip:
+        if file_path is not None and reason not in {"no_reply_markers"}:
+            logger.debug(f"Skipping quoted-reply stripping for {file_path.name}: {reason}")
         return text
-    except (ValueError, TypeError, AttributeError) as e:
+
+    if config.quote_strip_timeout_seconds > 0:
+        return _quote_stripper.strip(text, file_path=file_path)
+
+    try:
+        return _run_unquote(text, _unquote_parser)
+    except (ValueError, TypeError, AttributeError, RuntimeError) as e:
         # Issue #11: Log specific exceptions instead of swallowing silently
         logger.debug(f"Could not parse quoted reply: {e}")
         return text
@@ -253,7 +425,7 @@ def parse_email_file(file_path: Path, base_dir: Optional[Path] = None) -> Option
 
         # Remove quoted replies from body text
         if body_text:
-            body_text = remove_quoted_reply(body_text)
+            body_text = remove_quoted_reply(body_text, file_path=file_path)
 
         # Extract attachments
         attachments = extract_attachments(msg)
@@ -369,7 +541,9 @@ def read_emails_batch(
 
     try:
         for file_path in scan_eml_files(directory, show_progress=False, modified_after=modified_after):
+            _update_reader_status(current_file=file_path)
             email_data = parse_email_file(file_path, base_dir=directory)
+            _update_reader_status(last_file=file_path)
             if email_data:
                 batch.append(email_data)
                 if len(batch) >= batch_size:
@@ -403,6 +577,8 @@ def read_emails_batch(
             if batch_to_yield:
                 yield batch_to_yield
     finally:
+        clear_reader_status()
+        _quote_stripper.close()
         if pbar is not None:
             pbar.close()
         if show_progress:
