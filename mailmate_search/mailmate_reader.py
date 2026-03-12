@@ -60,6 +60,35 @@ def get_reader_status() -> Dict[str, Optional[str]]:
         return dict(_reader_status)
 
 
+def _get_raw_header(msg, header_name: str) -> str:
+    """Return the raw header value without triggering structured parsing."""
+    try:
+        for key, value in msg.raw_items():
+            if key.lower() == header_name.lower():
+                return value
+    except AttributeError:
+        pass
+    return ""
+
+
+def _get_safe_header(msg, header_name: str) -> str:
+    """Read a header while tolerating malformed structured header values."""
+    try:
+        value = msg.get(header_name, "")
+        return str(value) if value is not None else ""
+    except (AttributeError, IndexError, TypeError, ValueError) as e:
+        raw_value = _get_raw_header(msg, header_name)
+        if raw_value:
+            logger.debug(
+                "Falling back to raw %s header for malformed message: %s",
+                header_name,
+                e,
+            )
+            return raw_value
+        logger.debug("Failed to read %s header: %s", header_name, e)
+        return ""
+
+
 def _has_reply_markers(text: str) -> bool:
     lower = text.lower()
     return (
@@ -377,7 +406,7 @@ def parse_email_file(file_path: Path, base_dir: Optional[Path] = None) -> Option
             msg = email.message_from_binary_file(f, policy=email.policy.default)
 
         # Extract headers
-        subject = msg.get("Subject", "")
+        subject = _get_safe_header(msg, "Subject")
         if subject:
             # Decode subject if needed
             decoded_subject = email.header.decode_header(subject)
@@ -390,12 +419,12 @@ def parse_email_file(file_path: Path, base_dir: Optional[Path] = None) -> Option
                 ]
             )
 
-        from_addr = msg.get("From", "")
-        to_addrs = msg.get("To", "")
-        cc_addrs = msg.get("Cc", "")
-        bcc_addrs = msg.get("Bcc", "")
-        date_str = msg.get("Date", "")
-        message_id = msg.get("Message-ID", "")
+        from_addr = _get_safe_header(msg, "From")
+        to_addrs = _get_safe_header(msg, "To")
+        cc_addrs = _get_safe_header(msg, "Cc")
+        bcc_addrs = _get_safe_header(msg, "Bcc")
+        date_str = _get_safe_header(msg, "Date")
+        message_id = _get_safe_header(msg, "Message-ID")
 
         # Parse date
         date_obj = None
