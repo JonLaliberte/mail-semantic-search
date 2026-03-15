@@ -125,6 +125,36 @@ Recommended initial MCP tools:
 - `query_emails`: metadata-only lookup
 - `get_status`: index and configuration summary
 
+### Claude Desktop (macOS)
+
+Claude Desktop reads MCP server config from:
+
+```bash
+~/Library/Application Support/Claude/claude_desktop_config.json
+```
+
+Add a `mailmate-search` entry under `mcpServers`:
+
+```json
+{
+  "mcpServers": {
+    "mailmate-search": {
+      "command": "/bin/zsh",
+      "args": [
+        "-lc",
+        "cd /Users/yourusername/Development/mailmate-search && .venv/bin/mailmate-search-mcp"
+      ]
+    }
+  }
+}
+```
+
+Notes:
+- Replace `/Users/yourusername` with your real home directory.
+- Starting the server this way ensures the project `.env` file is loaded from the repo root.
+- If you prefer, you can launch the module directly instead: `cd /Users/yourusername/Development/mailmate-search && .venv/bin/python -m mailmate_search.mcp_server`
+- After editing the config, fully quit and reopen Claude Desktop.
+
 Phase 3 answer synthesis should stay separate from retrieval, either as a future MCP tool like `answer_question` or a separate CLI command.
 
 ## Storage Requirements
