@@ -6,6 +6,7 @@ AI-powered semantic search for MailMate emails using local embeddings and vector
 
 - **Local AI Embeddings**: Uses sentence-transformers models (default: BGE-base-en-v1.5) running entirely on your machine
 - **Semantic Search**: Find emails by meaning, not just keywords
+- **MCP Server**: Expose search/query/status as local MCP tools for editors and agents
 - **Dockerized**: Easy setup with Docker and Docker Compose
 - **Incremental Indexing**: Only indexes new or changed emails
 - **Privacy-First**: All processing happens locally, no external APIs
@@ -75,6 +76,7 @@ All configuration is done via the `.env` file:
 - `RERANK_ENABLED`: Enable local cross-encoder reranking (default: `false`)
 - `RERANKER_MODEL`: Cross-encoder model (default: `cross-encoder/ms-marco-MiniLM-L-6-v2`)
 - `RERANK_MAX_CANDIDATES`: Candidate pool size before rerank (default: `50`)
+- `RERANK_MAX_TEXT_CHARS`: Max candidate text length passed to reranker (default: `1200`)
 - `LOG_PATH`: Runtime log file for internal warnings/errors/diagnostics (default: `./data/logs/mailmate-search.error.log`)
 - `LOG_LEVEL`: App log verbosity written to `LOG_PATH` (default: `INFO`)
 - `LOG_THIRD_PARTY_LEVEL`: Third-party library log verbosity written to `LOG_PATH` (default: `WARNING`)
@@ -98,7 +100,32 @@ Incremental behavior (`index --incremental`):
   - `--auto-filters/--no-auto-filters`: Override local parser toggle per query
   - `--rerank/--no-rerank`: Override local reranker toggle per query
 
+- `query`: Query emails using metadata filters only
+
 - `status`: Show indexing status and statistics
+
+## MCP Server
+
+This project can also run as a local **stdio MCP server**. The MCP process is started by the client when needed; it does not require a separate always-on database service.
+
+Storage/runtime model:
+- SQLite is opened directly from disk by the Python process
+- Chroma uses the local persistent store on disk
+- The reranker loads in-process
+- The query parser only needs a separate local service if you keep `QUERY_PARSER_ENDPOINT` pointed at something like Ollama
+
+Install dependencies in your local Python environment, then run:
+
+```bash
+mailmate-search-mcp
+```
+
+Recommended initial MCP tools:
+- `search_emails`: semantic search with optional auto-filters and reranking
+- `query_emails`: metadata-only lookup
+- `get_status`: index and configuration summary
+
+Phase 3 answer synthesis should stay separate from retrieval, either as a future MCP tool like `answer_question` or a separate CLI command.
 
 ## Storage Requirements
 

@@ -1,7 +1,8 @@
 """Search logic for emails."""
 
+from dataclasses import asdict
 from datetime import datetime
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from mailmate_search.config import config
 from mailmate_search.database import Database, get_file_hash
@@ -9,6 +10,13 @@ from mailmate_search.embedding_service import EmbeddingService
 from mailmate_search.query_parser import LocalQueryParser
 from mailmate_search.query import QueryBuilder
 from mailmate_search.reranker import CrossEncoderReranker
+from mailmate_search.service_models import (
+    QueryRequest,
+    QueryResponse,
+    SearchRequest,
+    SearchResponse,
+    StatusResponse,
+)
 from mailmate_search.vector_store import VectorStore
 
 
@@ -83,6 +91,295 @@ def _parse_optional_date(date_str: Optional[str]) -> Optional[datetime]:
         return None
 
 
+def _filters_from_search_request(request: SearchRequest) -> Dict[str, object]:
+    """Return a JSON-friendly filters dictionary."""
+    return {
+        "from_addr": request.from_addr,
+        "to_addr": request.to_addr,
+        "subject": request.subject,
+        "subject_like": request.subject_like,
+        "date_after": request.date_after.isoformat() if request.date_after else None,
+        "date_before": request.date_before.isoformat() if request.date_before else None,
+        "has_attachments": request.has_attachments,
+        "attachment_type": request.attachment_type,
+        "attachment_name": request.attachment_name,
+    }
+
+
+def _filters_from_query_request(request: QueryRequest) -> Dict[str, object]:
+    """Return a JSON-friendly filters dictionary."""
+    return {
+        "from_addr": request.from_addr,
+        "to_addr": request.to_addr,
+        "subject": request.subject,
+        "subject_like": request.subject_like,
+        "date_after": request.date_after.isoformat() if request.date_after else None,
+        "date_before": request.date_before.isoformat() if request.date_before else None,
+        "has_attachments": request.has_attachments,
+        "attachment_type": request.attachment_type,
+        "attachment_name": request.attachment_name,
+        "limit": request.limit,
+    }
+
+
+def _resolved_search_request(request: SearchRequest) -> Tuple[SearchRequest, bool]:
+    """Apply parser-derived filters while preserving explicit overrides."""
+    parser_enabled = (
+        config.query_parser_enabled
+        if request.auto_filters is None
+        else request.auto_filters
+    )
+    if not parser_enabled:
+        return request, False
+
+    parsed_query = LocalQueryParser().parse(request.query)
+    if not parsed_query:
+        return request, False
+
+    resolved = SearchRequest(
+        query=request.query,
+        from_addr=request.from_addr
+        if request.from_addr is not None
+        else parsed_query.from_addr,
+        to_addr=request.to_addr if request.to_addr is not None else parsed_query.to_addr,
+        subject=request.subject if request.subject is not None else parsed_query.subject,
+        subject_like=request.subject_like
+        if request.subject_like is not None
+        else parsed_query.subject_like,
+        date_after=request.date_after
+        if request.date_after is not None
+        else _parse_optional_date(parsed_query.date_after),
+        date_before=request.date_before
+        if request.date_before is not None
+        else _parse_optional_date(parsed_query.date_before),
+        has_attachments=request.has_attachments
+        if request.has_attachments is not None
+        else parsed_query.has_attachments,
+        attachment_type=request.attachment_type
+        if request.attachment_type is not None
+        else parsed_query.attachment_type,
+        attachment_name=request.attachment_name
+        if request.attachment_name is not None
+        else parsed_query.attachment_name,
+        limit=request.limit,
+        auto_filters=request.auto_filters,
+        rerank=request.rerank,
+    )
+
+    if parsed_query.semantic_query:
+        resolved.query = parsed_query.semantic_query
+
+    return resolved, True
+
+
+def _normalize_result(result: Dict) -> Dict:
+    """Normalize a result to a stable JSON-friendly shape."""
+    normalized = dict(result)
+    if "from" in normalized and "from_addr" not in normalized:
+        normalized["from_addr"] = normalized["from"]
+    if "to" in normalized and "to_addrs" not in normalized:
+        normalized["to_addrs"] = normalized["to"]
+    normalized.setdefault("attachments", [])
+    normalized.pop("from", None)
+    normalized.pop("to", None)
+    return normalized
+
+
+def search_email_records(request: SearchRequest) -> SearchResponse:
+    """Run semantic search and return structured results."""
+    resolved_request, parser_applied = _resolved_search_request(request)
+    effective_query = resolved_request.query
+    final_result_count = resolved_request.limit or config.search_results
+
+    rerank_enabled = (
+        config.rerank_enabled if resolved_request.rerank is None else resolved_request.rerank
+    )
+    retrieval_candidate_count = (
+        max(final_result_count, config.rerank_max_candidates)
+        if rerank_enabled
+        else final_result_count
+    )
+
+    with Database() as database, VectorStore() as vector_store:
+        embedding_service = EmbeddingService()
+        query_builder = QueryBuilder(database)
+
+        vector_stats = vector_store.get_stats()
+        db_stats = database.get_stats()
+        if vector_stats["total_emails"] == 0 and db_stats["total_emails"] == 0:
+            return SearchResponse(
+                query=request.query,
+                effective_query=effective_query,
+                parser_applied=parser_applied,
+                rerank_applied=False,
+                indexed_emails=0,
+                filters=_filters_from_search_request(resolved_request),
+                message="No emails indexed yet. Please run 'index' command first.",
+            )
+
+        has_filters = any(
+            [
+                resolved_request.from_addr,
+                resolved_request.to_addr,
+                resolved_request.subject,
+                resolved_request.subject_like,
+                resolved_request.date_after,
+                resolved_request.date_before,
+                resolved_request.has_attachments is not None,
+                resolved_request.attachment_type,
+                resolved_request.attachment_name,
+            ]
+        )
+
+        if has_filters:
+            filtered_emails = query_builder.build_query(
+                from_addr=resolved_request.from_addr,
+                to_addr=resolved_request.to_addr,
+                subject=resolved_request.subject,
+                subject_like=resolved_request.subject_like,
+                date_after=resolved_request.date_after,
+                date_before=resolved_request.date_before,
+                has_attachments=resolved_request.has_attachments,
+                attachment_type=resolved_request.attachment_type,
+                attachment_name=resolved_request.attachment_name,
+                limit=config.max_filtered_search_limit,
+            )
+
+            if not filtered_emails:
+                return SearchResponse(
+                    query=request.query,
+                    effective_query=effective_query,
+                    parser_applied=parser_applied,
+                    rerank_applied=False,
+                    indexed_emails=vector_stats["total_emails"],
+                    filters=_filters_from_search_request(resolved_request),
+                    message="No emails match the filters.",
+                )
+
+            filtered_hashes_set = {
+                get_file_hash(email["file_path"]) for email in filtered_emails
+            }
+            query_embedding = embedding_service.embed_query(effective_query)
+            desired_candidates = retrieval_candidate_count
+
+            if len(filtered_emails) <= desired_candidates:
+                vector_limit = len(filtered_emails)
+            else:
+                vector_limit = min(desired_candidates * 2, len(filtered_emails), 1000)
+
+            vector_results = vector_store.search(query_embedding, n_results=vector_limit)
+            filtered_vector_results = [
+                result
+                for result in vector_results
+                if get_file_hash(result.get("file_path", "")) in filtered_hashes_set
+            ]
+
+            if (
+                len(filtered_vector_results) < desired_candidates
+                and vector_limit < len(filtered_emails)
+            ):
+                expanded_results = vector_store.search(
+                    query_embedding, n_results=min(len(filtered_emails), 1000)
+                )
+                filtered_vector_results = [
+                    result
+                    for result in expanded_results
+                    if get_file_hash(result.get("file_path", "")) in filtered_hashes_set
+                ]
+
+            candidates = filtered_vector_results[:desired_candidates]
+            results = []
+            for candidate in candidates:
+                file_hash = get_file_hash(candidate.get("file_path", ""))
+                db_email = database.get_email_by_file_hash(file_hash)
+                if db_email:
+                    merged = {**candidate, **db_email}
+                    merged["similarity"] = 1 - candidate.get("distance", 0)
+                    results.append(_normalize_result(merged))
+                else:
+                    results.append(_normalize_result(candidate))
+        else:
+            query_embedding = embedding_service.embed_query(effective_query)
+            vector_results = vector_store.search(
+                query_embedding, n_results=retrieval_candidate_count
+            )
+
+            results = []
+            for candidate in vector_results:
+                file_hash = get_file_hash(candidate.get("file_path", ""))
+                db_email = database.get_email_by_file_hash(file_hash)
+                if db_email:
+                    merged = {**candidate, **db_email}
+                    merged["similarity"] = 1 - candidate.get("distance", 0)
+                    results.append(_normalize_result(merged))
+                else:
+                    results.append(_normalize_result(candidate))
+
+        rerank_applied = False
+        if rerank_enabled and results:
+            results = CrossEncoderReranker().rerank(
+                effective_query,
+                results,
+                top_k=final_result_count,
+            )
+            results = [_normalize_result(result) for result in results]
+            rerank_applied = True
+        else:
+            results = results[:final_result_count]
+
+        return SearchResponse(
+            query=request.query,
+            effective_query=effective_query,
+            parser_applied=parser_applied,
+            rerank_applied=rerank_applied,
+            indexed_emails=vector_stats["total_emails"],
+            filters=_filters_from_search_request(resolved_request),
+            results=results,
+        )
+
+
+def query_email_records(request: QueryRequest) -> QueryResponse:
+    """Run metadata-only query and return structured results."""
+    with Database() as database:
+        query_builder = QueryBuilder(database)
+        results = query_builder.build_query(
+            from_addr=request.from_addr,
+            to_addr=request.to_addr,
+            subject=request.subject,
+            subject_like=request.subject_like,
+            date_after=request.date_after,
+            date_before=request.date_before,
+            has_attachments=request.has_attachments,
+            attachment_type=request.attachment_type,
+            attachment_name=request.attachment_name,
+            limit=request.limit,
+        )
+    return QueryResponse(
+        filters=_filters_from_query_request(request),
+        results=[_normalize_result(result) for result in results],
+    )
+
+
+def get_status_data() -> StatusResponse:
+    """Return structured indexing status."""
+    with Database() as database, VectorStore() as vector_store:
+        vector_stats = vector_store.get_stats()
+        db_stats = database.get_stats()
+        return StatusResponse(
+            embedding_model=config.embedding_model,
+            mailmate_directory=str(config.mailmate_email_dir),
+            chromadb_path=str(config.chromadb_path),
+            database_path=str(config.database_path),
+            total_indexed_emails=vector_stats["total_emails"],
+            total_emails=db_stats["total_emails"],
+            total_attachments=db_stats["total_attachments"],
+            emails_with_attachments=db_stats["emails_with_attachments"],
+            date_range=db_stats["date_range"],
+            batch_size=config.batch_size,
+            search_results=config.search_results,
+        )
+
+
 def search_emails(
     query: str,
     from_addr: Optional[str] = None,
@@ -101,186 +398,48 @@ def search_emails(
     """Search for emails matching a query with optional filters."""
     print(f"Searching for: '{query}'")
     print(f"Using embedding model: {config.embedding_model}")
-
-    parser_enabled = config.query_parser_enabled if auto_filters is None else auto_filters
-    rerank_enabled = config.rerank_enabled if rerank is None else rerank
-    effective_query = query
-
-    if parser_enabled:
-        parser = LocalQueryParser()
-        parsed_query = parser.parse(query)
-        if parsed_query:
-            effective_query = parsed_query.semantic_query
-
-            if from_addr is None:
-                from_addr = parsed_query.from_addr
-            if to_addr is None:
-                to_addr = parsed_query.to_addr
-            if subject is None:
-                subject = parsed_query.subject
-            if subject_like is None:
-                subject_like = parsed_query.subject_like
-            if date_after is None:
-                date_after = _parse_optional_date(parsed_query.date_after)
-            if date_before is None:
-                date_before = _parse_optional_date(parsed_query.date_before)
-            if has_attachments is None:
-                has_attachments = parsed_query.has_attachments
-            if attachment_type is None:
-                attachment_type = parsed_query.attachment_type
-            if attachment_name is None:
-                attachment_name = parsed_query.attachment_name
-
-            print("Applied local auto-filters from query parser.")
-
-    final_result_count = config.search_results
-    retrieval_candidate_count = (
-        max(final_result_count, config.rerank_max_candidates)
-        if rerank_enabled
-        else final_result_count
+    response = search_email_records(
+        SearchRequest(
+            query=query,
+            from_addr=from_addr,
+            to_addr=to_addr,
+            subject=subject,
+            subject_like=subject_like,
+            date_after=date_after,
+            date_before=date_before,
+            has_attachments=has_attachments,
+            attachment_type=attachment_type,
+            attachment_name=attachment_name,
+            auto_filters=auto_filters,
+            rerank=rerank,
+        )
     )
 
-    # Initialize services with context managers for proper cleanup
-    with Database() as database, VectorStore() as vector_store:
-        embedding_service = EmbeddingService()
-        query_builder = QueryBuilder(database)
+    print(f"Searching in {response.indexed_emails} indexed emails...")
+    if response.parser_applied:
+        print("Applied local auto-filters from query parser.")
+    if response.filters and any(value is not None for value in response.filters.values()):
+        print("Applying filters...")
+    if response.rerank_applied and response.results:
+        print(f"Reranking top {len(response.results)} candidates with local cross-encoder...")
+    if response.message and not response.results:
+        print(response.message)
+        return
+    display_results(response.results, show_attachments=show_attachments)
 
-        # Check if any emails are indexed
-        stats = vector_store.get_stats()
-        db_stats = database.get_stats()
-        if stats["total_emails"] == 0 and db_stats["total_emails"] == 0:
-            print("No emails indexed yet. Please run 'index' command first.")
-            return
 
-        print(f"Searching in {stats['total_emails']} indexed emails...")
+def search_email_records_payload(request: SearchRequest) -> Dict:
+    """Return search response as a JSON-friendly dict."""
+    return asdict(search_email_records(request))
 
-        # Check if we have filters
-        has_filters = any(
-            [
-                from_addr,
-                to_addr,
-                subject,
-                subject_like,
-                date_after,
-                date_before,
-                has_attachments is not None,
-                attachment_type,
-                attachment_name,
-            ]
-        )
 
-        if has_filters:
-            # Hybrid search: filter first, then vector search on results
-            print("Applying filters...")
-            # Limit filtered results to prevent memory issues with large result sets
-            filtered_emails = query_builder.build_query(
-                from_addr=from_addr,
-                to_addr=to_addr,
-                subject=subject,
-                subject_like=subject_like,
-                date_after=date_after,
-                date_before=date_before,
-                has_attachments=has_attachments,
-                attachment_type=attachment_type,
-                attachment_name=attachment_name,
-                limit=config.max_filtered_search_limit,
-            )
+def query_email_records_payload(request: QueryRequest) -> Dict:
+    """Return query response as a JSON-friendly dict."""
+    return asdict(query_email_records(request))
 
-            if not filtered_emails:
-                print("No emails match the filters.")
-                return
 
-            print(f"Found {len(filtered_emails)} emails matching filters, searching semantically...")
-
-            # Get file hashes for filtered emails
-            file_hashes = [
-                get_file_hash(email["file_path"])
-                for email in filtered_emails
-            ]
-            filtered_hashes_set = set(file_hashes)
-
-            # Generate query embedding
-            query_embedding = embedding_service.embed_query(effective_query)
-
-            # Issue #7: Optimize vector search limit based on filtered result count
-            # If we have fewer filtered emails than desired results, search exactly that many
-            # Otherwise, search proportionally more but cap at a reasonable limit
-            desired_candidates = retrieval_candidate_count
-            if len(filtered_emails) <= desired_candidates:
-                # Small result set - search all filtered emails
-                vector_limit = len(filtered_emails)
-            else:
-                # Larger result set - search with some overhead for ranking
-                vector_limit = min(desired_candidates * 2, len(filtered_emails), 1000)
-
-            vector_results = vector_store.search(
-                query_embedding, n_results=vector_limit
-            )
-
-            # Filter vector results to only include filtered emails
-            filtered_vector_results = [
-                r for r in vector_results
-                if get_file_hash(r.get("file_path", "")) in filtered_hashes_set
-            ]
-
-            # If we didn't get enough results, expand the search
-            if len(filtered_vector_results) < desired_candidates and vector_limit < len(filtered_emails):
-                # Search with larger limit
-                vector_results = vector_store.search(
-                    query_embedding, n_results=min(len(filtered_emails), 1000)
-                )
-                filtered_vector_results = [
-                    r for r in vector_results
-                    if get_file_hash(r.get("file_path", "")) in filtered_hashes_set
-                ]
-
-            # Limit to candidate budget before reranking/final cut
-            filtered_vector_results = filtered_vector_results[:desired_candidates]
-
-            # Enrich with database metadata
-            results = []
-            for vr in filtered_vector_results:
-                file_hash = get_file_hash(vr.get("file_path", ""))
-                db_email = database.get_email_by_file_hash(file_hash)
-                if db_email:
-                    # Merge vector search result with database metadata
-                    result = {**vr, **db_email}
-                    result["similarity"] = 1 - vr.get("distance", 0)
-                    results.append(result)
-                else:
-                    results.append(vr)
-
-        else:
-            # Pure vector search
-            query_embedding = embedding_service.embed_query(effective_query)
-            vector_results = vector_store.search(
-                query_embedding, n_results=retrieval_candidate_count
-            )
-
-            # Enrich with database metadata
-            results = []
-            for vr in vector_results:
-                file_hash = get_file_hash(vr.get("file_path", ""))
-                db_email = database.get_email_by_file_hash(file_hash)
-                if db_email:
-                    result = {**vr, **db_email}
-                    result["similarity"] = 1 - vr.get("distance", 0)
-                    results.append(result)
-                else:
-                    results.append(vr)
-
-        if rerank_enabled and results:
-            print(
-                f"Reranking top {min(len(results), retrieval_candidate_count)} candidates with local cross-encoder..."
-            )
-            reranker = CrossEncoderReranker()
-            results = reranker.rerank(
-                effective_query, results, top_k=final_result_count
-            )
-        else:
-            results = results[:final_result_count]
-
-        # Display results
-        display_results(results, show_attachments=show_attachments)
+def get_status_data_payload() -> Dict:
+    """Return status response as a JSON-friendly dict."""
+    return asdict(get_status_data())
 
 

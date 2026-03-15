@@ -9,7 +9,11 @@ from sentence_transformers import SentenceTransformer
 from transformers.utils import logging as transformers_logging
 
 from mailmate_search.config import config
-from mailmate_search.runtime_logging import LoggerWriter, redirect_stderr_to_logger
+from mailmate_search.runtime_logging import (
+    LoggerWriter,
+    configure_logging,
+    redirect_stderr_to_logger,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +36,7 @@ class EmbeddingService:
 
     def __init__(self, model_name: Optional[str] = None):
         """Initialize the embedding service with a model."""
+        configure_logging()
         configured_model = model_name or config.embedding_model
         self.model_name = resolve_model_name(configured_model)
 

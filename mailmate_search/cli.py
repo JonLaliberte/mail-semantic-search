@@ -8,17 +8,19 @@ from typing import Optional, Tuple
 
 import click
 
-from mailmate_search.config import config
-from mailmate_search.database import Database
 from mailmate_search.index import index_emails
-from mailmate_search.query import QueryBuilder
 from mailmate_search.runtime_logging import (
     configure_logging,
     configure_runtime_diagnostics,
     get_runtime_log_path,
 )
-from mailmate_search.search import display_results, search_emails
-from mailmate_search.vector_store import VectorStore
+from mailmate_search.search import (
+    display_results,
+    get_status_data,
+    query_email_records,
+    search_emails,
+)
+from mailmate_search.service_models import QueryRequest
 
 logger = logging.getLogger(__name__)
 
@@ -222,10 +224,8 @@ def query(
         has_attachments_flag = False
     
     try:
-        with Database() as database:
-            query_builder = QueryBuilder(database)
-            
-            results = query_builder.build_query(
+        response = query_email_records(
+            QueryRequest(
                 from_addr=from_addr,
                 to_addr=to_addr,
                 subject=subject,
@@ -237,9 +237,10 @@ def query(
                 attachment_name=attachment_name,
                 limit=limit,
             )
-            
-            # Display results
-            display_results(results, show_attachments=show_attachments)
+        )
+
+        # Display results
+        display_results(response.results, show_attachments=show_attachments)
     except sqlite3.Error as e:
         handle_error(f"Database error: {e}", log_exception=True)
     except (OSError, RuntimeError, ValueError, TypeError) as e:
@@ -250,27 +251,27 @@ def query(
 def status():
     """Show indexing status and statistics."""
     try:
-        with Database() as database, VectorStore() as vector_store:
-            vector_stats = vector_store.get_stats()
-            db_stats = database.get_stats()
+        status_data = get_status_data()
 
-            print("MailMate Search Status")
-            print("=" * 40)
-            print(f"Embedding Model: {config.embedding_model}")
-            print(f"MailMate Directory: {config.mailmate_email_dir}")
-            print(f"ChromaDB Path: {config.chromadb_path}")
-            print(f"Database Path: {config.database_path}")
-            print(f"\nChromaDB Statistics:")
-            print(f"  Total Indexed Emails: {vector_stats['total_emails']}")
-            print(f"\nDatabase Statistics:")
-            print(f"  Total Emails: {db_stats['total_emails']}")
-            print(f"  Total Attachments: {db_stats['total_attachments']}")
-            print(f"  Emails with Attachments: {db_stats['emails_with_attachments']}")
-            if db_stats['date_range']['min']:
-                print(f"  Date Range: {db_stats['date_range']['min']} to {db_stats['date_range']['max']}")
-            print(f"\nConfiguration:")
-            print(f"  Batch Size: {config.batch_size}")
-            print(f"  Search Results: {config.search_results}")
+        print("MailMate Search Status")
+        print("=" * 40)
+        print(f"Embedding Model: {status_data.embedding_model}")
+        print(f"MailMate Directory: {status_data.mailmate_directory}")
+        print(f"ChromaDB Path: {status_data.chromadb_path}")
+        print(f"Database Path: {status_data.database_path}")
+        print(f"\nChromaDB Statistics:")
+        print(f"  Total Indexed Emails: {status_data.total_indexed_emails}")
+        print(f"\nDatabase Statistics:")
+        print(f"  Total Emails: {status_data.total_emails}")
+        print(f"  Total Attachments: {status_data.total_attachments}")
+        print(f"  Emails with Attachments: {status_data.emails_with_attachments}")
+        if status_data.date_range["min"]:
+            print(
+                f"  Date Range: {status_data.date_range['min']} to {status_data.date_range['max']}"
+            )
+        print(f"\nConfiguration:")
+        print(f"  Batch Size: {status_data.batch_size}")
+        print(f"  Search Results: {status_data.search_results}")
     except sqlite3.Error as e:
         handle_error(f"Database error: {e}", log_exception=True)
     except (OSError, RuntimeError, ValueError, TypeError) as e:

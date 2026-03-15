@@ -1,21 +1,37 @@
 """Cross-encoder reranking for semantic search candidates."""
 
+from contextlib import ExitStack, redirect_stdout
 import os
+import logging
 from typing import Dict, List
 
 from sentence_transformers import CrossEncoder
 
 from mailmate_search.config import config
+from mailmate_search.runtime_logging import (
+    LoggerWriter,
+    configure_logging,
+    redirect_stderr_to_logger,
+)
+
+logger = logging.getLogger(__name__)
 
 
 class CrossEncoderReranker:
     """Local cross-encoder reranker."""
 
     def __init__(self) -> None:
+        configure_logging()
         cache_dir = str(config.model_cache_dir.absolute())
         os.environ["TRANSFORMERS_CACHE"] = cache_dir
         os.environ["HF_HOME"] = cache_dir
-        self.model = CrossEncoder(config.reranker_model)
+        with ExitStack() as stack:
+            stack.enter_context(redirect_stdout(LoggerWriter(logger, logging.WARNING)))
+            stack.enter_context(redirect_stderr_to_logger(logger, logging.WARNING))
+            self.model = CrossEncoder(
+                config.reranker_model,
+                cache_folder=cache_dir,
+            )
 
     def rerank(self, query: str, candidates: List[Dict], top_k: int) -> List[Dict]:
         """Rerank candidates and return top_k results."""
