@@ -57,7 +57,13 @@ def handle_error(
 @click.group()
 @click.version_option(version="0.1.0")
 def main():
-    """MailMate AI Search Tool - Semantic search for your emails."""
+    """MailMate AI Search Tool - Semantic search for your emails.
+
+    Common examples:
+      index --incremental   Only scan files newer than the latest indexed email date
+      index --no-skip       Re-index all emails even if already indexed
+      search "quarterly planning deck"   Find relevant emails by meaning
+    """
     configure_logging()
     configure_runtime_diagnostics()
 
