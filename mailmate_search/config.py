@@ -37,6 +37,7 @@ class Config:
     DEFAULT_RERANK_MAX_TEXT_CHARS = 1200
     DEFAULT_INDEX_HEARTBEAT_SECONDS = 60
     DEFAULT_INDEX_STALL_DUMP_SECONDS = 300
+    DEFAULT_INCREMENTAL_OVERLAP_SECONDS = 24 * 60 * 60
     DEFAULT_QUOTE_STRIP_TIMEOUT_SECONDS = 2.0
     DEFAULT_QUOTE_STRIP_MAX_CHARS = 50000
     DEFAULT_QUOTE_STRIP_MAX_LINES = 1500
@@ -149,6 +150,12 @@ class Config:
             os.getenv(
                 "INDEX_STALL_DUMP_SECONDS",
                 str(self.DEFAULT_INDEX_STALL_DUMP_SECONDS),
+            )
+        )
+        self.incremental_overlap_seconds: int = int(
+            os.getenv(
+                "INCREMENTAL_OVERLAP_SECONDS",
+                str(self.DEFAULT_INCREMENTAL_OVERLAP_SECONDS),
             )
         )
 

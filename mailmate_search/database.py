@@ -122,6 +122,16 @@ class Database:
             """
         )
 
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS app_state (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+
         # Create indexes
         # Note: Indexes on to_addrs, cc_addrs, bcc_addrs help with exact matches
         # and LIKE queries with trailing wildcards (e.g., 'value%')
@@ -474,6 +484,51 @@ class Database:
         except ValueError:
             logger.debug(f"Could not parse latest indexed email date: {date_str}")
             return None
+
+    def get_max_indexed_file_mtime(self) -> Optional[datetime]:
+        """Return the latest indexed file modification time as a datetime."""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT MAX(file_mtime) AS max_file_mtime FROM emails WHERE file_mtime IS NOT NULL")
+        row = cursor.fetchone()
+        if not row or row["max_file_mtime"] is None:
+            return None
+
+        try:
+            return datetime.fromtimestamp(float(row["max_file_mtime"]))
+        except (TypeError, ValueError, OSError) as e:
+            logger.debug(f"Could not parse max indexed file mtime: {row['max_file_mtime']}: {e}")
+            return None
+
+    def get_incremental_scan_watermark(self) -> Optional[datetime]:
+        """Return the persisted scan watermark, falling back to indexed file mtimes."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT value FROM app_state WHERE key = ?",
+            ("incremental_scan_watermark",),
+        )
+        row = cursor.fetchone()
+        if row and row["value"]:
+            try:
+                return datetime.fromisoformat(str(row["value"]))
+            except ValueError:
+                logger.debug(f"Could not parse incremental scan watermark: {row['value']}")
+
+        return self.get_max_indexed_file_mtime()
+
+    def set_incremental_scan_watermark(self, watermark: datetime) -> None:
+        """Persist the last successful incremental scan watermark."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO app_state (key, value, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            ("incremental_scan_watermark", watermark.isoformat()),
+        )
+        self.conn.commit()
 
     def close(self) -> None:
         """Close database connection."""

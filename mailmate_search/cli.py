@@ -64,7 +64,7 @@ def main():
     """MailMate AI Search Tool - Semantic search for your emails.
 
     Common examples:
-      index --incremental   Only scan files newer than the latest indexed email date
+      index --incremental   Scan files newer than the incremental watermark minus overlap
       index --no-skip       Re-index all emails even if already indexed
       search "quarterly planning deck"   Find relevant emails by meaning
     """
@@ -86,7 +86,7 @@ def main():
 @click.option(
     "--incremental",
     is_flag=True,
-    help="Only scan files newer than latest indexed email date",
+    help="Only scan files newer than the saved incremental watermark minus overlap",
 )
 def index(limit: int, no_skip: bool, incremental: bool):
     """Index emails from MailMate directory."""

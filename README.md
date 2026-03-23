@@ -77,6 +77,7 @@ All configuration is done via the `.env` file:
 - `RERANKER_MODEL`: Cross-encoder model (default: `cross-encoder/ms-marco-MiniLM-L-6-v2`)
 - `RERANK_MAX_CANDIDATES`: Candidate pool size before rerank (default: `50`)
 - `RERANK_MAX_TEXT_CHARS`: Max candidate text length passed to reranker (default: `1200`)
+- `INCREMENTAL_OVERLAP_SECONDS`: Re-scan window subtracted from the incremental watermark to catch clock skew and odd file writes (default: `86400`)
 - `LOG_PATH`: Runtime log file for internal warnings/errors/diagnostics (default: `./data/logs/mailmate-search.error.log`)
 - `LOG_LEVEL`: App log verbosity written to `LOG_PATH` (default: `INFO`)
 - `LOG_THIRD_PARTY_LEVEL`: Third-party library log verbosity written to `LOG_PATH` (default: `WARNING`)
@@ -90,10 +91,13 @@ Normal CLI output stays in the terminal. Internal warnings, diagnostics, and tra
 - `index`: Index emails from MailMate directory
   - `--limit N`: Limit indexing to N emails (for testing)
   - `--no-skip`: Re-index all emails even if already indexed (full rebuild behavior)
-  - `--incremental`: Only scan files newer than latest indexed email date
+  - `--incremental`: Only scan files newer than the saved incremental watermark minus an overlap window
 
 Incremental behavior (`index --incremental`):
-- Finds the most recent indexed email date and scans only files newer than that cutoff.
+- Uses the last successful incremental scan time as the primary watermark.
+- Falls back to the maximum indexed file mtime for older indexes that predate the watermark.
+- Scans files whose filesystem mtime is newer than `watermark - INCREMENTAL_OVERLAP_SECONDS` (default: 24 hours).
+- Advances the watermark only after a fully successful incremental run.
 - Still writes updates by file path and vector ID, so reruns stay idempotent for changed files in the candidate set.
 
 - `search "query"`: Search for emails matching the query

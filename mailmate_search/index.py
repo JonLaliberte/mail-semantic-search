@@ -269,12 +269,31 @@ def index_emails(
         total_indexed = 0
         total_skipped = 0
         total_seen = 0
+        batch_failures = 0
+        run_interrupted = False
 
         date_cutoff = None
         if incremental and skip_indexed:
-            date_cutoff = database.get_latest_indexed_email_date()
-            if date_cutoff:
-                print(f"Incremental mode cutoff (newer than): {date_cutoff.isoformat()}")
+            watermark = database.get_incremental_scan_watermark()
+            if watermark:
+                overlap_seconds = max(config.incremental_overlap_seconds, 0)
+                date_cutoff = datetime.fromtimestamp(
+                    watermark.timestamp() - overlap_seconds
+                )
+                print(f"Incremental mode watermark: {watermark.isoformat()}")
+                print(
+                    "Incremental overlap: "
+                    f"{overlap_seconds} seconds"
+                )
+                print(
+                    "Incremental mode cutoff (mtime newer than): "
+                    f"{date_cutoff.isoformat()}"
+                )
+            else:
+                print(
+                    "Incremental mode has no prior watermark yet; "
+                    "scanning all files and recording a watermark on success."
+                )
 
         if limit is not None:
             progress_total = limit
@@ -391,6 +410,7 @@ def index_emails(
                 except (sqlite3.Error, OSError, RuntimeError, ValueError, TypeError) as e:
                     # Issue #11 & #17: Log error and rollback SQLite
                     logger.error(f"Failed to index batch of {len(emails_to_index)} emails: {e}")
+                    batch_failures += 1
                     try:
                         database.conn.rollback()
                     except sqlite3.Error:
@@ -413,10 +433,23 @@ def index_emails(
 
         except KeyboardInterrupt:
             print("\nIndexing interrupted by user")
+            run_interrupted = True
         finally:
             diagnostics.stop()
             if pbar is not None:
                 pbar.close()
+
+        if incremental and skip_indexed and not run_interrupted and batch_failures == 0:
+            watermark = datetime.now()
+            database.set_incremental_scan_watermark(watermark)
+            print(
+                "Updated incremental scan watermark to: "
+                f"{watermark.isoformat()}"
+            )
+        elif incremental and skip_indexed and batch_failures > 0:
+            print(
+                "Incremental watermark not advanced because one or more batches failed."
+            )
 
         # Get final stats
         stats_after = vector_store.get_stats()
