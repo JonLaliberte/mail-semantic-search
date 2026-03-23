@@ -15,7 +15,9 @@ from mailmate_search.runtime_logging import (
     get_runtime_log_path,
 )
 from mailmate_search.search import (
+    display_indexed_email,
     display_results,
+    get_indexed_email_data,
     get_status_data,
     query_email_records,
     search_emails,
@@ -245,6 +247,25 @@ def query(
         handle_error(f"Database error: {e}", log_exception=True)
     except (OSError, RuntimeError, ValueError, TypeError) as e:
         handle_error(f"Query failed: {e}", log_exception=True)
+
+
+@main.command()
+@click.option(
+    "--file-path",
+    required=True,
+    help="Exact email file path to inspect in the index",
+)
+def inspect(file_path: str):
+    """Show indexed SQLite and Chroma data for one email."""
+    try:
+        data = get_indexed_email_data(file_path)
+        if not data:
+            handle_error(f"No indexed email found for file path: {file_path}")
+        display_indexed_email(data)
+    except sqlite3.Error as e:
+        handle_error(f"Database error: {e}", log_exception=True)
+    except (OSError, RuntimeError, ValueError, TypeError) as e:
+        handle_error(f"Inspect failed: {e}", log_exception=True)
 
 
 @main.command()

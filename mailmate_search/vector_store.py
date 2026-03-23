@@ -46,6 +46,28 @@ class VectorStore:
             logger.debug(f"ChromaDB lookup failed for {file_path}: {e}")
         return False
 
+    def get_email_document(self, file_path: str) -> Optional[Dict]:
+        """Return stored Chroma document and metadata for one indexed email."""
+        file_id = self._get_file_hash(file_path)
+        try:
+            results = self.collection.get(ids=[file_id])
+        except chromadb.errors.ChromaError as e:
+            logger.debug(f"ChromaDB retrieval failed for {file_path}: {e}")
+            return None
+
+        ids = results.get("ids") or []
+        if not ids:
+            return None
+
+        documents = results.get("documents") or []
+        metadatas = results.get("metadatas") or []
+
+        return {
+            "id": ids[0],
+            "document": documents[0] if documents else "",
+            "metadata": metadatas[0] if metadatas else {},
+        }
+
     def add_emails(
         self,
         emails: List[Dict],

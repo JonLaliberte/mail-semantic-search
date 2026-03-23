@@ -81,6 +81,98 @@ def display_results(results: List[dict], show_attachments: bool = False) -> None
         print("-" * 80)
 
 
+def _display_attachment_list(attachments: List[Dict]) -> None:
+    """Display attachment details for a single email."""
+    if not attachments:
+        print("Attachments: none")
+        return
+
+    print(f"Attachments ({len(attachments)}):")
+    for attachment in attachments:
+        filename = attachment.get("filename", "Unknown")
+        size = attachment.get("size", 0)
+        content_type = attachment.get("content_type", "")
+        extension = attachment.get("file_extension", "")
+        details = []
+        if size:
+            details.append(f"{size:,} bytes")
+        if content_type:
+            details.append(content_type)
+        if extension:
+            details.append(f".{extension}")
+        suffix = f" [{', '.join(details)}]" if details else ""
+        print(f"  - {filename}{suffix}")
+
+
+def get_indexed_email_data(file_path: str) -> Optional[Dict]:
+    """Return the indexed SQLite and Chroma data for one email file path."""
+    file_hash = get_file_hash(file_path)
+
+    with Database() as database, VectorStore() as vector_store:
+        db_email = database.get_email_by_file_hash(file_hash)
+        if db_email and db_email.get("id") is not None:
+            db_email["attachments"] = database.get_attachments(int(db_email["id"]))
+
+        chroma_email = vector_store.get_email_document(file_path)
+
+    if not db_email and not chroma_email:
+        return None
+
+    return {
+        "file_path": file_path,
+        "file_hash": file_hash,
+        "sqlite": db_email,
+        "chroma": chroma_email,
+    }
+
+
+def display_indexed_email(data: Dict) -> None:
+    """Display a single indexed email from SQLite and Chroma."""
+    print("Indexed Email")
+    print("=" * 80)
+    print(f"File Path: {data.get('file_path', 'Unknown')}")
+    print(f"File Hash: {data.get('file_hash', 'Unknown')}")
+
+    sqlite_email = data.get("sqlite")
+    if sqlite_email:
+        print("\nSQLite Metadata")
+        print("-" * 80)
+        print(f"DB ID: {sqlite_email.get('id', 'Unknown')}")
+        print(f"Message-ID: {sqlite_email.get('message_id') or 'Unknown'}")
+        print(f"Subject: {sqlite_email.get('subject') or 'No subject'}")
+        print(f"From: {sqlite_email.get('from_addr') or 'Unknown'}")
+        print(f"To: {sqlite_email.get('to_addrs') or ''}")
+        print(f"Cc: {sqlite_email.get('cc_addrs') or ''}")
+        print(f"Bcc: {sqlite_email.get('bcc_addrs') or ''}")
+        print(f"Date: {format_date(str(sqlite_email.get('date', '')))}")
+        print(f"Indexed At: {sqlite_email.get('indexed_at') or 'Unknown'}")
+        print(f"File Mtime: {sqlite_email.get('file_mtime') or 'Unknown'}")
+        print(f"Has Attachments: {bool(sqlite_email.get('has_attachments'))}")
+        print(f"Attachment Count: {sqlite_email.get('attachment_count', 0)}")
+        print(f"Body Preview: {sqlite_email.get('body_preview') or ''}")
+        _display_attachment_list(sqlite_email.get("attachments", []))
+    else:
+        print("\nSQLite Metadata")
+        print("-" * 80)
+        print("No SQLite record found for this file path.")
+
+    chroma_email = data.get("chroma")
+    if chroma_email:
+        print("\nChroma Document")
+        print("-" * 80)
+        print(f"Chroma ID: {chroma_email.get('id', 'Unknown')}")
+        print("Metadata:")
+        metadata = chroma_email.get("metadata", {}) or {}
+        for key in sorted(metadata.keys()):
+            print(f"  {key}: {metadata.get(key)}")
+        print("\nIndexed Document:")
+        print(chroma_email.get("document") or "")
+    else:
+        print("\nChroma Document")
+        print("-" * 80)
+        print("No Chroma record found for this file path.")
+
+
 def _parse_optional_date(date_str: Optional[str]) -> Optional[datetime]:
     """Parse YYYY-MM-DD or ISO datetime, returning None on invalid."""
     if not date_str:

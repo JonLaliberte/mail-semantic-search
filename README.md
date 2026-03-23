@@ -102,6 +102,8 @@ Incremental behavior (`index --incremental`):
 
 - `query`: Query emails using metadata filters only
 
+- `inspect --file-path "/full/path/to/email.eml"`: Show the indexed SQLite metadata and exact Chroma document for one email
+
 - `status`: Show indexing status and statistics
 
 ## MCP Server
