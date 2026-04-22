@@ -4,9 +4,7 @@ services:
     container_name: mailmate-search
     volumes:
       - ${MAILMATE_EMAIL_DIR}:/emails:ro
-      - ./data/chromadb:/app/data/chromadb
-      - ./data/models:/app/data/models
-      - ./data:/app/data
+      - "/Volumes/External Storage SSD/Docker/mailmate-search/data:/app/data"
     environment:
       - EMBEDDING_MODEL=${EMBEDDING_MODEL:-BGE-base-en-v1.5}
       - MAILMATE_EMAIL_DIR=/emails
