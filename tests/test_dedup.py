@@ -1,21 +1,12 @@
-import sqlite3
-import tempfile
 from pathlib import Path
 
 import pytest
 
-from mail_semantic_search.database import Database, get_file_hash
+from mail_semantic_search.database import Database
 
 
 def _make_db(tmp_path: Path) -> Database:
-    db_path = tmp_path / "test.db"
-    # Patch config so Database uses our tmp path
-    import mail_semantic_search.config as cfg_mod
-    orig = cfg_mod.config.database_path
-    cfg_mod.config.database_path = db_path
-    db = Database(db_path)
-    cfg_mod.config.database_path = orig
-    return db
+    return Database(tmp_path / "test.db")
 
 
 def _add_email(db: Database, file_path: str, message_id: str, subject: str = "test") -> int:
@@ -54,9 +45,8 @@ def test_get_email_by_message_id_returns_row(tmp_path):
 def test_get_email_by_message_id_none_message_id(tmp_path):
     db = _make_db(tmp_path)
     _add_email(db, "/emails/b.eml", "")
-    # Empty/None message_id lookup must not crash or return random rows
-    result = db.get_email_by_message_id("")
-    # Result may or may not be found — must not raise
+    assert db.get_email_by_message_id("") is None   # must short-circuit, not scan
+    assert db.get_email_by_message_id(None) is None  # type: ignore[arg-type]
     db.close()
 
 
