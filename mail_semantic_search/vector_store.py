@@ -152,6 +152,14 @@ class VectorStore:
             metadatas=metadatas,
         )
 
+    def delete_email(self, file_path: str) -> None:
+        """Remove the Chroma document for the given file path."""
+        file_id = self._get_file_hash(file_path)
+        try:
+            self.collection.delete(ids=[file_id])
+        except Exception as e:
+            logger.debug("Chroma delete failed for %s: %s", file_path, e)
+
     def search(
         self, query_embedding: List[float], n_results: int = 10
     ) -> List[Dict]:

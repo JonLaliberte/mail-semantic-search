@@ -75,3 +75,31 @@ def test_message_id_index_exists(tmp_path):
         f"Expected a message_id index, found: {index_names}"
     )
     db.close()
+
+
+def test_vector_store_delete_email_removes_entry(tmp_path):
+    """delete_email() should remove the Chroma document for the given file path."""
+    import mail_semantic_search.config as cfg_mod
+    orig_chroma = cfg_mod.config.chromadb_path
+    cfg_mod.config.chromadb_path = tmp_path / "chroma"
+
+    from mail_semantic_search.vector_store import VectorStore
+
+    vs = VectorStore()
+    email = {
+        "file_path": "/emails/vec.eml",
+        "subject": "hello",
+        "from": "a@x.com",
+        "to": "b@x.com",
+        "date": "2024-01-01",
+        "message_id": "<vec@x>",
+        "attachments": [],
+    }
+    fake_embedding = [0.1] * 768  # BGE-base dimension
+    vs.add_emails([email], [fake_embedding])
+    assert vs.is_indexed("/emails/vec.eml")
+
+    vs.delete_email("/emails/vec.eml")
+    assert not vs.is_indexed("/emails/vec.eml")
+
+    cfg_mod.config.chromadb_path = orig_chroma
