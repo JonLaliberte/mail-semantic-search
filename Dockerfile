@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y \
 COPY pyproject.toml ./
 
 # Copy application code
-COPY mailmate_search/ ./mailmate_search/
+COPY mail_semantic_search/ ./mail_semantic_search/
 
 # Install Python dependencies
 RUN pip install --no-cache-dir --upgrade pip && \
@@ -27,7 +27,7 @@ ENV HF_HOME=/app/data/models
 RUN mkdir -p /app/data/chromadb /app/data/models
 
 # Entrypoint
-ENTRYPOINT ["python", "-m", "mailmate_search.cli"]
+ENTRYPOINT ["python", "-m", "mail_semantic_search.cli"]
 
 
 
