@@ -48,13 +48,13 @@ AI-powered semantic search for MailMate emails using local embeddings and vector
 
 5. **Index your emails:**
    ```bash
-   docker compose run --rm mailmate-search index
+   docker compose run --rm mail-semantic-search index
    ```
    This may take several hours for large email collections (35GB = ~700k emails). Indexing shows percent complete by default.
 
 6. **Search your emails:**
    ```bash
-   docker compose run --rm mailmate-search search "your query here"
+   docker compose run --rm mail-semantic-search search "your query here"
    ```
 
 Because this project is a CLI container (not a long-running daemon), `docker compose up -d` will start, print help, and exit. Use `docker compose run --rm ...` for commands.
@@ -66,7 +66,7 @@ All configuration is done via the `.env` file:
 - `EMBEDDING_MODEL`: Embedding model to use (default: `BGE-base-en-v1.5`)
   - Options: `BGE-base-en-v1.5` (best quality), `BGE-small-en-v1.5`, `nomic-embed-text-v1`, `all-MiniLM-L6-v2`
 - `MAILMATE_EMAIL_DIR`: Path to MailMate messages directory
-- `DATA_VOLUME_PATH`: Host path Docker bind-mounts as `/app/data` (default: `./data`). Set to an absolute path when storing index data on an external drive, e.g. `/Volumes/My Drive/mailmate-search/data`
+- `DATA_VOLUME_PATH`: Host path Docker bind-mounts as `/app/data` (default: `./data`). Set to an absolute path when storing index data on an external drive, e.g. `/Volumes/My Drive/mail-semantic-search/data`
 - `CHROMADB_PATH`: Where to store ChromaDB data
 - `MODEL_CACHE_DIR`: Where to cache downloaded models
 - `BATCH_SIZE`: Number of emails to process at once (default: 32)
@@ -80,7 +80,7 @@ All configuration is done via the `.env` file:
 - `RERANK_MAX_CANDIDATES`: Candidate pool size before rerank (default: `50`)
 - `RERANK_MAX_TEXT_CHARS`: Max candidate text length passed to reranker (default: `1200`)
 - `INCREMENTAL_OVERLAP_SECONDS`: Re-scan window subtracted from the incremental watermark to catch clock skew and odd file writes (default: `86400`)
-- `LOG_PATH`: Runtime log file for internal warnings/errors/diagnostics (default: `./data/logs/mailmate-search.error.log`)
+- `LOG_PATH`: Runtime log file for internal warnings/errors/diagnostics (default: `./data/logs/mail-semantic-search.error.log`)
 - `LOG_LEVEL`: App log verbosity written to `LOG_PATH` (default: `INFO`)
 - `LOG_THIRD_PARTY_LEVEL`: Third-party library log verbosity written to `LOG_PATH` (default: `WARNING`)
 - `LOG_MAX_BYTES`: Log rotation size threshold in bytes (default: `10485760`)
@@ -125,7 +125,7 @@ Storage/runtime model:
 Install dependencies in your local Python environment, then run:
 
 ```bash
-mailmate-search-mcp
+mail-semantic-search-mcp
 ```
 
 Recommended initial MCP tools:
@@ -141,18 +141,18 @@ Claude Desktop reads MCP server config from:
 ~/Library/Application Support/Claude/claude_desktop_config.json
 ```
 
-Add a `mailmate-search` entry under `mcpServers`.
+Add a `mail-semantic-search` entry under `mcpServers`.
 
 **Option A — local venv (simplest when the MCP client can read your `DATABASE_PATH` / `CHROMADB_PATH`):**
 
 ```json
 {
   "mcpServers": {
-    "mailmate-search": {
+    "mail-semantic-search": {
       "command": "/bin/zsh",
       "args": [
         "-lc",
-        "cd /Users/yourusername/Development/mailmate-search && .venv/bin/mailmate-search-mcp"
+        "cd /Users/yourusername/Development/mail-semantic-search && .venv/bin/mail-semantic-search-mcp"
       ]
     }
   }
@@ -166,11 +166,11 @@ Indexing already uses Compose mounts and `/app/data/...` inside the container. R
 ```json
 {
   "mcpServers": {
-    "mailmate-search": {
+    "mail-semantic-search": {
       "command": "/bin/zsh",
       "args": [
         "-lc",
-        "cd /Users/yourusername/Development/mailmate-search && docker compose run --rm -i -T --entrypoint python mailmate-search -m mailmate_search.mcp_server"
+        "cd /Users/yourusername/Development/mail-semantic-search && docker compose run --rm -i -T --entrypoint python mail-semantic-search -m mail_semantic_search.mcp_server"
       ]
     }
   }
@@ -184,7 +184,7 @@ Notes:
 - **One project, one data directory:** Compose still resolves `${MAILMATE_EMAIL_DIR}` and `env_file: .env` from the repo when you `cd` there first.
 - **Why MCP is not “in Docker” by default:** the MCP client spawns whatever command you configure. A local venv is the usual default; Option B is the supported way to align MCP with the same container mounts as indexing when the client blocks direct access to external volumes.
 - **If Option A shows zero indexed emails while Docker search works:** your host `.env` paths did not match the compose bind mount; align them or use Option B.
-- If you prefer, you can launch the module directly instead of the console script: `cd /Users/yourusername/Development/mailmate-search && .venv/bin/python -m mailmate_search.mcp_server`
+- If you prefer, you can launch the module directly instead of the console script: `cd /Users/yourusername/Development/mail-semantic-search && .venv/bin/python -m mail_semantic_search.mcp_server`
 - After editing the config, fully quit and reopen Claude Desktop.
 
 ## Keeping Your Index Fresh
@@ -194,7 +194,7 @@ The MCP server and CLI search only what has been indexed. Running `index --incre
 **Command to schedule** (replace `yourusername` with your home directory):
 
 ```bash
-cd /Users/yourusername/Development/mailmate-search && /opt/homebrew/bin/docker compose run --rm mailmate-search index --incremental
+cd /Users/yourusername/Development/mail-semantic-search && /opt/homebrew/bin/docker compose run --rm mail-semantic-search index --incremental
 ```
 
 > **Note:** Use the full path to `docker` (`/opt/homebrew/bin/docker` on Apple Silicon Homebrew installs). Cron and launchd do not inherit your shell `PATH`.
@@ -204,14 +204,14 @@ cd /Users/yourusername/Development/mailmate-search && /opt/homebrew/bin/docker c
 Edit your crontab with `crontab -e` and add one line. This example runs every hour:
 
 ```
-0 * * * * cd /Users/yourusername/Development/mailmate-search && /opt/homebrew/bin/docker compose run --rm mailmate-search index --incremental >> /tmp/mailmate-index.log 2>&1
+0 * * * * cd /Users/yourusername/Development/mail-semantic-search && /opt/homebrew/bin/docker compose run --rm mail-semantic-search index --incremental >> /tmp/mail-semantic-search-index.log 2>&1
 ```
 
 To run once daily at 9am instead, change the schedule to `0 9 * * *`.
 
 ### Option B — launchd (robust, macOS-native)
 
-Create `~/Library/LaunchAgents/com.mailmate-search.index.plist` with the following content (replace `yourusername`):
+Create `~/Library/LaunchAgents/com.mail-semantic-search.index.plist` with the following content (replace `yourusername`):
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -219,12 +219,12 @@ Create `~/Library/LaunchAgents/com.mailmate-search.index.plist` with the followi
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.mailmate-search.index</string>
+    <string>com.mail-semantic-search.index</string>
     <key>ProgramArguments</key>
     <array>
         <string>/bin/zsh</string>
         <string>-lc</string>
-        <string>cd /Users/yourusername/Development/mailmate-search &amp;&amp; /opt/homebrew/bin/docker compose run --rm mailmate-search index --incremental</string>
+        <string>cd /Users/yourusername/Development/mail-semantic-search &amp;&amp; /opt/homebrew/bin/docker compose run --rm mail-semantic-search index --incremental</string>
     </array>
     <key>StartCalendarInterval</key>
     <dict>
@@ -234,9 +234,9 @@ Create `~/Library/LaunchAgents/com.mailmate-search.index.plist` with the followi
         <integer>0</integer>
     </dict>
     <key>StandardOutPath</key>
-    <string>/tmp/mailmate-search-index.log</string>
+    <string>/tmp/mail-semantic-search-index.log</string>
     <key>StandardErrorPath</key>
-    <string>/tmp/mailmate-search-index.error.log</string>
+    <string>/tmp/mail-semantic-search-index.error.log</string>
     <key>RunAtLoad</key>
     <false/>
 </dict>
@@ -246,10 +246,10 @@ Create `~/Library/LaunchAgents/com.mailmate-search.index.plist` with the followi
 Load it:
 
 ```bash
-launchctl load ~/Library/LaunchAgents/com.mailmate-search.index.plist
+launchctl load ~/Library/LaunchAgents/com.mail-semantic-search.index.plist
 ```
 
-To unload: `launchctl unload ~/Library/LaunchAgents/com.mailmate-search.index.plist`
+To unload: `launchctl unload ~/Library/LaunchAgents/com.mail-semantic-search.index.plist`
 
 ### Option C — Keyboard Maestro
 
@@ -259,9 +259,9 @@ For users who already have [Keyboard Maestro](https://www.keyboardmaestro.com/):
 2. Add an **Execute Shell Script** action. Set shell to `/bin/zsh`.
 3. Paste the full command:
    ```
-   cd /Users/yourusername/Development/mailmate-search && /opt/homebrew/bin/docker compose run --rm mailmate-search index --incremental
+   cd /Users/yourusername/Development/mail-semantic-search && /opt/homebrew/bin/docker compose run --rm mail-semantic-search index --incremental
    ```
-4. Optionally pipe output to a log file by appending `>> /tmp/mailmate-index.log 2>&1`.
+4. Optionally pipe output to a log file by appending `>> /tmp/mail-semantic-search-index.log 2>&1`.
 
 No PATH issues since the full docker path is explicit.
 
@@ -277,7 +277,7 @@ For 35GB of email data (~700,000 emails):
 
 To switch embedding models:
 1. Update `EMBEDDING_MODEL` in `.env`
-2. Re-run indexing: `docker compose run --rm mailmate-search index --no-skip`
+2. Re-run indexing: `docker compose run --rm mail-semantic-search index --no-skip`
 
 The system will automatically download and use the new model.
 

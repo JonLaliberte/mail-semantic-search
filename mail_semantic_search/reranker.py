@@ -7,8 +7,8 @@ from typing import Dict, List
 
 from sentence_transformers import CrossEncoder
 
-from mailmate_search.config import config
-from mailmate_search.runtime_logging import (
+from mail_semantic_search.config import config
+from mail_semantic_search.runtime_logging import (
     LoggerWriter,
     configure_logging,
     redirect_stderr_to_logger,

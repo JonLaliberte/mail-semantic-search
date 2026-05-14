@@ -1,7 +1,7 @@
 [project]
-name = "mailmate-search"
+name = "mail-semantic-search"
 version = "0.1.0"
-description = "AI-powered semantic search for MailMate emails"
+description = "Local semantic search for email files using embeddings and vector search"
 requires-python = ">=3.10"
 dependencies = [
     "sentence-transformers>=2.2.0",
@@ -18,11 +18,11 @@ dependencies = [
 ]
 
 [project.scripts]
-mailmate-search = "mailmate_search.cli:main"
-mailmate-search-mcp = "mailmate_search.mcp_server:main"
+mail-semantic-search = "mail_semantic_search.cli:main"
+mail-semantic-search-mcp = "mail_semantic_search.mcp_server:main"
 
 [tool.setuptools]
-packages = ["mailmate_search"]
+packages = ["mail_semantic_search"]
 
 [build-system]
 requires = ["setuptools>=61.0", "wheel"]

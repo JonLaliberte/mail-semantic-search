@@ -1,7 +1,7 @@
 services:
-  mailmate-search:
+  mail-semantic-search:
     build: .
-    container_name: mailmate-search
+    container_name: mail-semantic-search
     volumes:
       - ${MAILMATE_EMAIL_DIR}:/emails:ro
       - ${DATA_VOLUME_PATH:-./data}:/app/data

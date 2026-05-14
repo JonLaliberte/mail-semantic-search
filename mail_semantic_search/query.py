@@ -4,8 +4,8 @@ from collections import defaultdict
 from datetime import datetime
 from typing import Dict, List, Optional
 
-from mailmate_search.config import config
-from mailmate_search.database import Database
+from mail_semantic_search.config import config
+from mail_semantic_search.database import Database
 
 
 class QueryBuilder:

@@ -12,16 +12,16 @@ from typing import Any, Dict, List, Optional, TypedDict
 
 from tqdm import tqdm
 
-from mailmate_search.config import config
-from mailmate_search.database import Database, get_file_hash
-from mailmate_search.embedding_service import EmbeddingService
-from mailmate_search.mailmate_reader import (
+from mail_semantic_search.config import config
+from mail_semantic_search.database import Database, get_file_hash
+from mail_semantic_search.embedding_service import EmbeddingService
+from mail_semantic_search.mailmate_reader import (
     count_eml_files,
     get_reader_status,
     read_emails_batch,
 )
-from mailmate_search.runtime_logging import dump_runtime_traceback
-from mailmate_search.vector_store import VectorStore
+from mail_semantic_search.runtime_logging import dump_runtime_traceback
+from mail_semantic_search.vector_store import VectorStore
 
 logger = logging.getLogger(__name__)
 

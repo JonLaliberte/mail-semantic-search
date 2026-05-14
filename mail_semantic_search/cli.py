@@ -8,13 +8,13 @@ from typing import Optional, Tuple
 
 import click
 
-from mailmate_search.index import index_emails
-from mailmate_search.runtime_logging import (
+from mail_semantic_search.index import index_emails
+from mail_semantic_search.runtime_logging import (
     configure_logging,
     configure_runtime_diagnostics,
     get_runtime_log_path,
 )
-from mailmate_search.search import (
+from mail_semantic_search.search import (
     display_indexed_email,
     display_results,
     get_indexed_email_data,
@@ -22,7 +22,7 @@ from mailmate_search.search import (
     query_email_records,
     search_emails,
 )
-from mailmate_search.service_models import QueryRequest
+from mail_semantic_search.service_models import QueryRequest
 
 logger = logging.getLogger(__name__)
 

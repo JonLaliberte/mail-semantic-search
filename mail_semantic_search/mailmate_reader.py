@@ -25,9 +25,9 @@ try:
 except ImportError:
     Unquote = None  # type: ignore[assignment]
 
-from mailmate_search.attachment_extractor import extract_text_from_attachment
-from mailmate_search.config import config
-from mailmate_search.database import validate_file_path
+from mail_semantic_search.attachment_extractor import extract_text_from_attachment
+from mail_semantic_search.config import config
+from mail_semantic_search.database import validate_file_path
 
 logger = logging.getLogger(__name__)
 

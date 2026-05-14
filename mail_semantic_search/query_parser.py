@@ -7,7 +7,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
-from mailmate_search.config import config
+from mail_semantic_search.config import config
 
 logger = logging.getLogger(__name__)
 

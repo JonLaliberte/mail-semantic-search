@@ -10,7 +10,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Iterator, Optional, TextIO
 
-from mailmate_search.config import config
+from mail_semantic_search.config import config
 
 _LOGGING_CONFIGURED = False
 _FAULT_LOG_STREAM: Optional[TextIO] = None
@@ -148,7 +148,7 @@ def configure_logging() -> None:
     root_logger.setLevel(third_party_level)
     root_logger.addHandler(handler)
 
-    logging.getLogger("mailmate_search").setLevel(app_level)
+    logging.getLogger("mail_semantic_search").setLevel(app_level)
     for logger_name in (
         "sentence_transformers",
         "transformers",

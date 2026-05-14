@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from mailmate_search.config import config
+from mail_semantic_search.config import config
 
 logger = logging.getLogger(__name__)
 

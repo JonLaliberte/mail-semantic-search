@@ -8,8 +8,8 @@ from typing import List, Optional
 from sentence_transformers import SentenceTransformer
 from transformers.utils import logging as transformers_logging
 
-from mailmate_search.config import config
-from mailmate_search.runtime_logging import (
+from mail_semantic_search.config import config
+from mail_semantic_search.runtime_logging import (
     LoggerWriter,
     configure_logging,
     redirect_stderr_to_logger,

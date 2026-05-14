@@ -7,8 +7,8 @@ from typing import Dict, List, Optional
 import chromadb
 from chromadb.config import Settings
 
-from mailmate_search.config import config
-from mailmate_search.database import get_file_hash
+from mail_semantic_search.config import config
+from mail_semantic_search.database import get_file_hash
 
 logger = logging.getLogger(__name__)
 

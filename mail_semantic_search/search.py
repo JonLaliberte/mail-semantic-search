@@ -4,20 +4,20 @@ from dataclasses import asdict
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
-from mailmate_search.config import config
-from mailmate_search.database import Database, get_file_hash
-from mailmate_search.embedding_service import EmbeddingService
-from mailmate_search.query_parser import LocalQueryParser
-from mailmate_search.query import QueryBuilder
-from mailmate_search.reranker import CrossEncoderReranker
-from mailmate_search.service_models import (
+from mail_semantic_search.config import config
+from mail_semantic_search.database import Database, get_file_hash
+from mail_semantic_search.embedding_service import EmbeddingService
+from mail_semantic_search.query_parser import LocalQueryParser
+from mail_semantic_search.query import QueryBuilder
+from mail_semantic_search.reranker import CrossEncoderReranker
+from mail_semantic_search.service_models import (
     QueryRequest,
     QueryResponse,
     SearchRequest,
     SearchResponse,
     StatusResponse,
 )
-from mailmate_search.vector_store import VectorStore
+from mail_semantic_search.vector_store import VectorStore
 
 
 def format_date(date_str: str) -> str:

@@ -7,17 +7,17 @@ from typing import Optional
 
 from fastmcp import FastMCP
 
-from mailmate_search.config import config
-from mailmate_search.runtime_logging import (
+from mail_semantic_search.config import config
+from mail_semantic_search.runtime_logging import (
     configure_logging,
     configure_runtime_diagnostics,
 )
-from mailmate_search.search import (
+from mail_semantic_search.search import (
     get_status_data_payload,
     query_email_records_payload,
     search_email_records_payload,
 )
-from mailmate_search.service_models import QueryRequest, SearchRequest
+from mail_semantic_search.service_models import QueryRequest, SearchRequest
 
 logger = logging.getLogger(__name__)
 
