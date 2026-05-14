@@ -187,6 +187,84 @@ Notes:
 - If you prefer, you can launch the module directly instead of the console script: `cd /Users/yourusername/Development/mailmate-search && .venv/bin/python -m mailmate_search.mcp_server`
 - After editing the config, fully quit and reopen Claude Desktop.
 
+## Keeping Your Index Fresh
+
+The MCP server and CLI search only what has been indexed. Running `index --incremental` regularly keeps results current as new mail arrives. Once a day is the minimum; every few hours is better.
+
+**Command to schedule** (replace `yourusername` with your home directory):
+
+```bash
+cd /Users/yourusername/Development/mailmate-search && /opt/homebrew/bin/docker compose run --rm mailmate-search index --incremental
+```
+
+> **Note:** Use the full path to `docker` (`/opt/homebrew/bin/docker` on Apple Silicon Homebrew installs). Cron and launchd do not inherit your shell `PATH`.
+
+### Option A — cron (quick)
+
+Edit your crontab with `crontab -e` and add one line. This example runs every hour:
+
+```
+0 * * * * cd /Users/yourusername/Development/mailmate-search && /opt/homebrew/bin/docker compose run --rm mailmate-search index --incremental >> /tmp/mailmate-index.log 2>&1
+```
+
+To run once daily at 9am instead, change the schedule to `0 9 * * *`.
+
+### Option B — launchd (robust, macOS-native)
+
+Create `~/Library/LaunchAgents/com.mailmate-search.index.plist` with the following content (replace `yourusername`):
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.mailmate-search.index</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/zsh</string>
+        <string>-lc</string>
+        <string>cd /Users/yourusername/Development/mailmate-search &amp;&amp; /opt/homebrew/bin/docker compose run --rm mailmate-search index --incremental</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>9</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/tmp/mailmate-search-index.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/mailmate-search-index.error.log</string>
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>
+```
+
+Load it:
+
+```bash
+launchctl load ~/Library/LaunchAgents/com.mailmate-search.index.plist
+```
+
+To unload: `launchctl unload ~/Library/LaunchAgents/com.mailmate-search.index.plist`
+
+### Option C — Keyboard Maestro
+
+For users who already have [Keyboard Maestro](https://www.keyboardmaestro.com/):
+
+1. Create a new macro with a **Time of Day** trigger (or **Periodic** trigger for sub-hourly).
+2. Add an **Execute Shell Script** action. Set shell to `/bin/zsh`.
+3. Paste the full command:
+   ```
+   cd /Users/yourusername/Development/mailmate-search && /opt/homebrew/bin/docker compose run --rm mailmate-search index --incremental
+   ```
+4. Optionally pipe output to a log file by appending `>> /tmp/mailmate-index.log 2>&1`.
+
+No PATH issues since the full docker path is explicit.
+
 ## Storage Requirements
 
 For 35GB of email data (~700,000 emails):
