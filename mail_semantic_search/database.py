@@ -140,6 +140,7 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_emails_date ON emails(date)",
             "CREATE INDEX IF NOT EXISTS idx_emails_has_attachments ON emails(has_attachments)",
             "CREATE INDEX IF NOT EXISTS idx_emails_file_hash ON emails(file_hash)",
+            "CREATE INDEX IF NOT EXISTS idx_emails_message_id ON emails(message_id)",
             "CREATE INDEX IF NOT EXISTS idx_emails_to_addrs ON emails(to_addrs)",
             "CREATE INDEX IF NOT EXISTS idx_emails_cc_addrs ON emails(cc_addrs)",
             "CREATE INDEX IF NOT EXISTS idx_emails_bcc_addrs ON emails(bcc_addrs)",
@@ -264,6 +265,28 @@ class Database:
         if row:
             return dict(row)
         return None
+
+    def get_email_by_message_id(self, message_id: str) -> Optional[Dict]:
+        """Return the first email row matching message_id, or None.
+
+        Returns None for empty/None message_id to avoid matching unaddressed emails.
+        """
+        if not message_id:
+            return None
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT * FROM emails WHERE message_id = ? LIMIT 1",
+            (message_id,),
+        )
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+    def delete_email_by_file_path(self, file_path: str, commit: bool = True) -> None:
+        """Delete the email row (and cascaded attachments) for the given file path."""
+        cursor = self.conn.cursor()
+        cursor.execute("DELETE FROM emails WHERE file_path = ?", (file_path,))
+        if commit:
+            self.conn.commit()
 
     def add_email(
         self,

@@ -17,6 +17,9 @@ dependencies = [
     "python-pptx>=0.6.0",
 ]
 
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
 [project.scripts]
 mail-semantic-search = "mail_semantic_search.cli:main"
 mail-semantic-search-mcp = "mail_semantic_search.mcp_server:main"
