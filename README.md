@@ -14,8 +14,9 @@ AI-powered semantic search for MailMate emails using local embeddings and vector
 ## Requirements
 
 - Docker and Docker Compose
-- Mac Mini M4 with 24GB RAM (or similar hardware)
 - MailMate email client with emails stored as .eml files
+- **Tested on:** Mac Mini M4, 24GB RAM
+- **Minimum recommended:** 16GB RAM (8GB may work for small collections); Apple Silicon or modern x86_64
 
 ## Quick Start
 
@@ -28,13 +29,13 @@ AI-powered semantic search for MailMate emails using local embeddings and vector
    cat > .env << 'EOF'
    EMBEDDING_MODEL=BGE-base-en-v1.5
    MAILMATE_EMAIL_DIR=/Users/yourusername/Library/Application Support/MailMate/Messages
-   CHROMADB_PATH=./data/chromadb
-   MODEL_CACHE_DIR=./data/models
+   DATA_VOLUME_PATH=./data
    BATCH_SIZE=32
    SEARCH_RESULTS=10
    EOF
    ```
    **Important**: Replace `/Users/yourusername` with your actual home directory path. The `MAILMATE_EMAIL_DIR` must be an absolute path for Docker volume mounting.
+   Alternatively, copy `.env.example` to `.env` and edit it.
 
 3. **Edit `.env` file:**
    - Set `MAILMATE_EMAIL_DIR` to your MailMate messages directory
@@ -65,6 +66,7 @@ All configuration is done via the `.env` file:
 - `EMBEDDING_MODEL`: Embedding model to use (default: `BGE-base-en-v1.5`)
   - Options: `BGE-base-en-v1.5` (best quality), `BGE-small-en-v1.5`, `nomic-embed-text-v1`, `all-MiniLM-L6-v2`
 - `MAILMATE_EMAIL_DIR`: Path to MailMate messages directory
+- `DATA_VOLUME_PATH`: Host path Docker bind-mounts as `/app/data` (default: `./data`). Set to an absolute path when storing index data on an external drive, e.g. `/Volumes/My Drive/mailmate-search/data`
 - `CHROMADB_PATH`: Where to store ChromaDB data
 - `MODEL_CACHE_DIR`: Where to cache downloaded models
 - `BATCH_SIZE`: Number of emails to process at once (default: 32)
@@ -184,8 +186,6 @@ Notes:
 - **If Option A shows zero indexed emails while Docker search works:** your host `.env` paths did not match the compose bind mount; align them or use Option B.
 - If you prefer, you can launch the module directly instead of the console script: `cd /Users/yourusername/Development/mailmate-search && .venv/bin/python -m mailmate_search.mcp_server`
 - After editing the config, fully quit and reopen Claude Desktop.
-
-Phase 3 answer synthesis should stay separate from retrieval, either as a future MCP tool like `answer_question` or a separate CLI command.
 
 ## Storage Requirements
 
