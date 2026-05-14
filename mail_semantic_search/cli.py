@@ -1,4 +1,4 @@
-"""CLI interface for MailMate search."""
+"""CLI interface for mail-semantic-search."""
 
 import logging
 import sqlite3
@@ -61,7 +61,7 @@ def handle_error(
 @click.group()
 @click.version_option(version="0.1.0")
 def main():
-    """MailMate AI Search Tool - Semantic search for your emails.
+    """mail-semantic-search - Semantic search for local email files.
 
     Common examples:
       index --incremental   Scan files newer than the incremental watermark minus overlap
@@ -89,7 +89,7 @@ def main():
     help="Only scan files newer than the saved incremental watermark minus overlap",
 )
 def index(limit: int, no_skip: bool, incremental: bool):
-    """Index emails from MailMate directory."""
+    """Index emails from a local directory."""
     try:
         index_emails(
             limit=limit,
@@ -274,10 +274,10 @@ def status():
     try:
         status_data = get_status_data()
 
-        print("MailMate Search Status")
+        print("Semantic Search Status")
         print("=" * 40)
         print(f"Embedding Model: {status_data.embedding_model}")
-        print(f"MailMate Directory: {status_data.mailmate_directory}")
+        print(f"Email Directory: {status_data.email_directory}")
         print(f"ChromaDB Path: {status_data.chromadb_path}")
         print(f"Database Path: {status_data.database_path}")
         print(f"\nChromaDB Statistics:")

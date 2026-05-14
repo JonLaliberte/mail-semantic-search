@@ -1,4 +1,4 @@
-"""Configuration management for MailMate search."""
+"""Configuration management for mail-semantic-search."""
 
 import os
 from pathlib import Path
@@ -50,14 +50,14 @@ class Config:
             "EMBEDDING_MODEL", "BGE-base-en-v1.5"
         )
 
-        # MailMate email directory
-        mailmate_dir = os.getenv(
-            "MAILMATE_EMAIL_DIR",
+        # Email directory
+        email_dir_str = os.getenv(
+            "EMAIL_DIR",
             os.path.expanduser(
                 "~/Library/Application Support/MailMate/Messages"
             ),
         )
-        self.mailmate_email_dir = Path(mailmate_dir)
+        self.email_dir = Path(email_dir_str)
 
         # ChromaDB storage path
         chromadb_path = os.getenv("CHROMADB_PATH", "./data/chromadb")
@@ -72,7 +72,7 @@ class Config:
         self.database_path = Path(database_path)
 
         # Runtime logging
-        log_path = os.getenv("LOG_PATH", "./data/logs/mailmate-search.error.log")
+        log_path = os.getenv("LOG_PATH", "./data/logs/mail-semantic-search.error.log")
         self.log_path = Path(log_path)
         self.log_level: str = os.getenv("LOG_LEVEL", "INFO").upper()
         self.log_third_party_level: str = os.getenv(
@@ -219,7 +219,7 @@ class Config:
         return (
             f"Config("
             f"embedding_model={self.embedding_model}, "
-            f"mailmate_email_dir={self.mailmate_email_dir}, "
+            f"email_dir={self.email_dir}, "
             f"chromadb_path={self.chromadb_path}, "
             f"batch_size={self.batch_size}, "
             f"search_results={self.search_results}"

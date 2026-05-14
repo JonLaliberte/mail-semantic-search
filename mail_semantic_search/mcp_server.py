@@ -1,4 +1,4 @@
-"""FastMCP server exposing MailMate search tools."""
+"""FastMCP server exposing mail-semantic-search tools."""
 
 import logging
 import sys
@@ -21,7 +21,7 @@ from mail_semantic_search.service_models import QueryRequest, SearchRequest
 
 logger = logging.getLogger(__name__)
 
-mcp = FastMCP(name="MailMate Search")
+mcp = FastMCP(name="Mail Semantic Search")
 
 
 def _parse_mcp_date(date_str: Optional[str]) -> Optional[datetime]:
@@ -126,10 +126,10 @@ def main() -> None:
     configure_logging()
     configure_runtime_diagnostics()
     logger.info(
-        "MCP startup paths: chromadb_path=%s database_path=%s mailmate_dir=%s",
+        "MCP startup paths: chromadb_path=%s database_path=%s email_dir=%s",
         config.chromadb_path,
         config.database_path,
-        config.mailmate_email_dir,
+        config.email_dir,
     )
     try:
         status = get_status_data_payload()

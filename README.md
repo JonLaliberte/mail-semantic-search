@@ -1,6 +1,6 @@
-# MailMate AI Search Tool
+# mail-semantic-search
 
-AI-powered semantic search for MailMate emails using local embeddings and vector search.
+Local semantic search for email files using local embeddings and vector search.
 
 ## Features
 
@@ -14,7 +14,7 @@ AI-powered semantic search for MailMate emails using local embeddings and vector
 ## Requirements
 
 - Docker and Docker Compose
-- MailMate email client with emails stored as .eml files
+- An email client that stores messages as .eml files (e.g. MailMate)
 - **Tested on:** Mac Mini M4, 24GB RAM
 - **Minimum recommended:** 16GB RAM (8GB may work for small collections); Apple Silicon or modern x86_64
 
@@ -25,20 +25,20 @@ AI-powered semantic search for MailMate emails using local embeddings and vector
 2. **Create `.env` file:**
    ```bash
    # Create .env file with the following content:
-   # Note: MAILMATE_EMAIL_DIR must be an absolute path (not ~)
+   # Note: EMAIL_DIR must be an absolute path (not ~)
    cat > .env << 'EOF'
    EMBEDDING_MODEL=BGE-base-en-v1.5
-   MAILMATE_EMAIL_DIR=/Users/yourusername/Library/Application Support/MailMate/Messages
+   EMAIL_DIR=/Users/yourusername/Library/Application Support/MailMate/Messages
    DATA_VOLUME_PATH=./data
    BATCH_SIZE=32
    SEARCH_RESULTS=10
    EOF
    ```
-   **Important**: Replace `/Users/yourusername` with your actual home directory path. The `MAILMATE_EMAIL_DIR` must be an absolute path for Docker volume mounting.
+   **Important**: Replace `/Users/yourusername` with your actual home directory path. The `EMAIL_DIR` must be an absolute path for Docker volume mounting.
    Alternatively, copy `.env.example` to `.env` and edit it.
 
 3. **Edit `.env` file:**
-   - Set `MAILMATE_EMAIL_DIR` to your MailMate messages directory
+   - Set `EMAIL_DIR` to your email messages directory
    - Adjust other settings as needed
 
 4. **Build the container image:**
@@ -65,7 +65,7 @@ All configuration is done via the `.env` file:
 
 - `EMBEDDING_MODEL`: Embedding model to use (default: `BGE-base-en-v1.5`)
   - Options: `BGE-base-en-v1.5` (best quality), `BGE-small-en-v1.5`, `nomic-embed-text-v1`, `all-MiniLM-L6-v2`
-- `MAILMATE_EMAIL_DIR`: Path to MailMate messages directory
+- `EMAIL_DIR`: Path to your email messages directory (must contain .eml files)
 - `DATA_VOLUME_PATH`: Host path Docker bind-mounts as `/app/data` (default: `./data`). Set to an absolute path when storing index data on an external drive, e.g. `/Volumes/My Drive/mail-semantic-search/data`
 - `CHROMADB_PATH`: Where to store ChromaDB data
 - `MODEL_CACHE_DIR`: Where to cache downloaded models
@@ -90,7 +90,7 @@ Normal CLI output stays in the terminal. Internal warnings, diagnostics, and tra
 
 ## Commands
 
-- `index`: Index emails from MailMate directory
+- `index`: Index emails from the configured email directory
   - `--limit N`: Limit indexing to N emails (for testing)
   - `--no-skip`: Re-index all emails even if already indexed (full rebuild behavior)
   - `--incremental`: Only scan files newer than the saved incremental watermark minus an overlap window
@@ -181,7 +181,7 @@ Docker Desktop must be running; the first tool call may wait for a short contain
 
 Notes:
 - Replace `/Users/yourusername` with your real home directory.
-- **One project, one data directory:** Compose still resolves `${MAILMATE_EMAIL_DIR}` and `env_file: .env` from the repo when you `cd` there first.
+- **One project, one data directory:** Compose still resolves `${EMAIL_DIR}` and `env_file: .env` from the repo when you `cd` there first.
 - **Why MCP is not “in Docker” by default:** the MCP client spawns whatever command you configure. A local venv is the usual default; Option B is the supported way to align MCP with the same container mounts as indexing when the client blocks direct access to external volumes.
 - **If Option A shows zero indexed emails while Docker search works:** your host `.env` paths did not match the compose bind mount; align them or use Option B.
 - If you prefer, you can launch the module directly instead of the console script: `cd /Users/yourusername/Development/mail-semantic-search && .venv/bin/python -m mail_semantic_search.mcp_server`
@@ -283,9 +283,9 @@ The system will automatically download and use the new model.
 
 ## Troubleshooting
 
-**MailMate directory not found:**
-- Check that `MAILMATE_EMAIL_DIR` in `.env` points to the correct path
-- Default location: `~/Library/Application Support/MailMate/Messages`
+**Email directory not found:**
+- Check that `EMAIL_DIR` in `.env` points to the correct path
+- MailMate default: `~/Library/Application Support/MailMate/Messages`
 
 **Out of memory:**
 - Reduce `BATCH_SIZE` in `.env`

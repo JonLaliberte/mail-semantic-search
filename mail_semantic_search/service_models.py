@@ -67,7 +67,7 @@ class StatusResponse:
     """Structured status payload."""
 
     embedding_model: str
-    mailmate_directory: str
+    email_directory: str
     chromadb_path: str
     database_path: str
     total_indexed_emails: int

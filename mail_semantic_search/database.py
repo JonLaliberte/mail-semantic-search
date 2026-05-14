@@ -30,13 +30,13 @@ def validate_file_path(file_path: str, base_dir: Optional[Path] = None) -> bool:
     Args:
         file_path: The file path to validate
         base_dir: Optional base directory the path should be within.
-                  If None, uses config.mailmate_email_dir.
+                  If None, uses config.email_dir.
     
     Returns:
         True if the path is valid and within the base directory, False otherwise.
     """
     if base_dir is None:
-        base_dir = config.mailmate_email_dir
+        base_dir = config.email_dir
     
     try:
         # Resolve both paths to handle symlinks and relative paths

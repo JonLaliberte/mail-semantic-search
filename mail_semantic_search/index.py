@@ -232,13 +232,13 @@ def index_emails(
     show_progress: bool = True,
     incremental: bool = False,
 ) -> None:
-    """Index all emails from the MailMate directory."""
-    email_dir = config.mailmate_email_dir
+    """Index all emails from the email directory."""
+    email_dir = config.email_dir
 
     if not email_dir.exists():
         raise FileNotFoundError(
-            f"MailMate email directory not found: {email_dir}. "
-            "Please set MAILMATE_EMAIL_DIR in your .env file."
+            f"Email directory not found: {email_dir}. "
+            "Please set EMAIL_DIR in your .env file."
         )
 
     print(f"Indexing emails from: {email_dir}")

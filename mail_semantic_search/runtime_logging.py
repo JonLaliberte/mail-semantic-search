@@ -46,13 +46,13 @@ def _resolve_effective_log_path() -> Path:
     """Pick a writable log file: prefer LOG_PATH, then repo ./data/logs, then temp."""
     for candidate in (
         config.log_path,
-        Path("./data/logs/mailmate-search.error.log"),
-        Path(tempfile.gettempdir()) / "mailmate-search.error.log",
+        Path("./data/logs/mail-semantic-search.error.log"),
+        Path(tempfile.gettempdir()) / "mail-semantic-search.error.log",
     ):
         resolved = _try_prepare_log_path(candidate)
         if resolved is not None:
             return resolved
-    return Path(tempfile.gettempdir()) / "mailmate-search.error.log"
+    return Path(tempfile.gettempdir()) / "mail-semantic-search.error.log"
 
 
 def _close_fault_log_stream() -> None:

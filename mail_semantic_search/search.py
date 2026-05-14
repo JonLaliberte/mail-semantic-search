@@ -459,7 +459,7 @@ def get_status_data() -> StatusResponse:
         db_stats = database.get_stats()
         return StatusResponse(
             embedding_model=config.embedding_model,
-            mailmate_directory=str(config.mailmate_email_dir),
+            email_directory=str(config.email_dir),
             chromadb_path=str(config.chromadb_path),
             database_path=str(config.database_path),
             total_indexed_emails=vector_stats["total_emails"],

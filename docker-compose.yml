@@ -3,11 +3,11 @@ services:
     build: .
     container_name: mail-semantic-search
     volumes:
-      - ${MAILMATE_EMAIL_DIR}:/emails:ro
+      - ${EMAIL_DIR}:/emails:ro
       - ${DATA_VOLUME_PATH:-./data}:/app/data
     environment:
       - EMBEDDING_MODEL=${EMBEDDING_MODEL:-BGE-base-en-v1.5}
-      - MAILMATE_EMAIL_DIR=/emails
+      - EMAIL_DIR=/emails
       - CHROMADB_PATH=/app/data/chromadb
       - MODEL_CACHE_DIR=/app/data/models
       - DATABASE_PATH=/app/data/database.db
