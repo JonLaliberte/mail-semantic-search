@@ -77,13 +77,12 @@ def test_message_id_index_exists(tmp_path):
     db.close()
 
 
-def test_vector_store_delete_email_removes_entry(tmp_path):
+def test_vector_store_delete_email_removes_entry(tmp_path, monkeypatch):
     """delete_email() should remove the Chroma document for the given file path."""
     import mail_semantic_search.config as cfg_mod
-    orig_chroma = cfg_mod.config.chromadb_path
-    cfg_mod.config.chromadb_path = tmp_path / "chroma"
-
     from mail_semantic_search.vector_store import VectorStore
+
+    monkeypatch.setattr(cfg_mod.config, "chromadb_path", tmp_path / "chroma")
 
     vs = VectorStore()
     email = {
@@ -102,4 +101,5 @@ def test_vector_store_delete_email_removes_entry(tmp_path):
     vs.delete_email("/emails/vec.eml")
     assert not vs.is_indexed("/emails/vec.eml")
 
-    cfg_mod.config.chromadb_path = orig_chroma
+    # Verify idempotent: deleting non-existent path must not raise
+    vs.delete_email("/emails/never_indexed.eml")

@@ -157,8 +157,8 @@ class VectorStore:
         file_id = self._get_file_hash(file_path)
         try:
             self.collection.delete(ids=[file_id])
-        except Exception as e:
-            logger.debug("Chroma delete failed for %s: %s", file_path, e)
+        except chromadb.errors.ChromaError as e:
+            logger.debug(f"ChromaDB delete failed for {file_path}: {e}")
 
     def search(
         self, query_embedding: List[float], n_results: int = 10
