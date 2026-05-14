@@ -139,7 +139,9 @@ Claude Desktop reads MCP server config from:
 ~/Library/Application Support/Claude/claude_desktop_config.json
 ```
 
-Add a `mailmate-search` entry under `mcpServers`:
+Add a `mailmate-search` entry under `mcpServers`.
+
+**Option A — local venv (simplest when the MCP client can read your `DATABASE_PATH` / `CHROMADB_PATH`):**
 
 ```json
 {
@@ -155,10 +157,32 @@ Add a `mailmate-search` entry under `mcpServers`:
 }
 ```
 
+**Option B — MCP via Docker (same process environment as `docker compose run … index/search`, one dataset on the bind-mounted volume):**
+
+Indexing already uses Compose mounts and `/app/data/...` inside the container. Running MCP the same way avoids the host MCP client having to open SQLite/Chroma under `/Volumes/...` at all. Use **`-i`** (keep stdin open for MCP) and **`-T`** (no pseudo-TTY):
+
+```json
+{
+  "mcpServers": {
+    "mailmate-search": {
+      "command": "/bin/zsh",
+      "args": [
+        "-lc",
+        "cd /Users/yourusername/Development/mailmate-search && docker compose run --rm -i -T --entrypoint python mailmate-search -m mailmate_search.mcp_server"
+      ]
+    }
+  }
+}
+```
+
+Docker Desktop must be running; the first tool call may wait for a short container cold start.
+
 Notes:
 - Replace `/Users/yourusername` with your real home directory.
-- Starting the server this way ensures the project `.env` file is loaded from the repo root.
-- If you prefer, you can launch the module directly instead: `cd /Users/yourusername/Development/mailmate-search && .venv/bin/python -m mailmate_search.mcp_server`
+- **One project, one data directory:** Compose still resolves `${MAILMATE_EMAIL_DIR}` and `env_file: .env` from the repo when you `cd` there first.
+- **Why MCP is not “in Docker” by default:** the MCP client spawns whatever command you configure. A local venv is the usual default; Option B is the supported way to align MCP with the same container mounts as indexing when the client blocks direct access to external volumes.
+- **If Option A shows zero indexed emails while Docker search works:** your host `.env` paths did not match the compose bind mount; align them or use Option B.
+- If you prefer, you can launch the module directly instead of the console script: `cd /Users/yourusername/Development/mailmate-search && .venv/bin/python -m mailmate_search.mcp_server`
 - After editing the config, fully quit and reopen Claude Desktop.
 
 Phase 3 answer synthesis should stay separate from retrieval, either as a future MCP tool like `answer_question` or a separate CLI command.
@@ -198,6 +222,13 @@ The system will automatically download and use the new model.
 **Warnings/errors while indexing:**
 - Progress bars and high-level status updates stay in the terminal
 - Internal warnings, diagnostics, and traceback dumps go to `LOG_PATH`
+
+**MCP / Claude and `LOG_PATH` on an external volume (`/Volumes/...`):**
+- A log file can be recently updated by Docker or a terminal session while **Claude’s MCP subprocess** still gets `PermissionError: Operation not permitted` opening the same path. That is normal on macOS: different apps (and sandboxed MCP hosts) do not share the same TCC / filesystem access as Docker Desktop.
+- Point **`LOG_PATH` at something inside the repo** (default `./data/logs/...`) or under your home directory so MCP can always open it. If the configured `LOG_PATH` is not writable, the app falls back automatically (repo `./data/logs`, then the system temp directory) and logs a warning once.
+
+**MCP / Claude and `DATABASE_PATH` / `CHROMADB_PATH` on `/Volumes/...`:**
+- If MCP logs `unable to open database file` (SQLite) or Chroma fails while `docker compose run` still works, the **MCP parent app** may be blocked from that path even though Docker is not. You still have **one dataset**; run MCP **inside** Compose (README **Option B — MCP via Docker**) or grant **Full Disk Access** to the Claude app, or point host-only paths under `~/...` if you use a local venv MCP.
 
 ## License
 

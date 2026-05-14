@@ -4,6 +4,7 @@ import atexit
 import faulthandler
 import logging
 import signal
+import tempfile
 from contextlib import redirect_stderr
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -13,6 +14,7 @@ from mailmate_search.config import config
 
 _LOGGING_CONFIGURED = False
 _FAULT_LOG_STREAM: Optional[TextIO] = None
+_EFFECTIVE_LOG_PATH: Optional[Path] = None
 
 
 def _parse_log_level(value: str, default: int) -> int:
@@ -22,8 +24,35 @@ def _parse_log_level(value: str, default: int) -> int:
 
 
 def get_runtime_log_path() -> Path:
-    """Return the configured runtime log path."""
+    """Return the runtime log path used by handlers and fault dumps."""
+    if _EFFECTIVE_LOG_PATH is not None:
+        return _EFFECTIVE_LOG_PATH
     return config.log_path
+
+
+def _try_prepare_log_path(candidate: Path) -> Optional[Path]:
+    """Return a resolved path if the file can be opened for append, else None."""
+    path = candidate.expanduser()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8"):
+            pass
+        return path.resolve()
+    except OSError:
+        return None
+
+
+def _resolve_effective_log_path() -> Path:
+    """Pick a writable log file: prefer LOG_PATH, then repo ./data/logs, then temp."""
+    for candidate in (
+        config.log_path,
+        Path("./data/logs/mailmate-search.error.log"),
+        Path(tempfile.gettempdir()) / "mailmate-search.error.log",
+    ):
+        resolved = _try_prepare_log_path(candidate)
+        if resolved is not None:
+            return resolved
+    return Path(tempfile.gettempdir()) / "mailmate-search.error.log"
 
 
 def _close_fault_log_stream() -> None:
@@ -39,9 +68,11 @@ def _close_fault_log_stream() -> None:
 
 def _get_fault_log_stream() -> TextIO:
     global _FAULT_LOG_STREAM
+    configure_logging()
+    log_path = get_runtime_log_path()
     if _FAULT_LOG_STREAM is None or _FAULT_LOG_STREAM.closed:
-        config.log_path.parent.mkdir(parents=True, exist_ok=True)
-        _FAULT_LOG_STREAM = open(config.log_path, "a", encoding="utf-8")
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        _FAULT_LOG_STREAM = open(log_path, "a", encoding="utf-8")
     return _FAULT_LOG_STREAM
 
 
@@ -85,11 +116,12 @@ def redirect_stderr_to_logger(
 
 def configure_logging() -> None:
     """Configure file logging for the CLI runtime."""
-    global _LOGGING_CONFIGURED
+    global _LOGGING_CONFIGURED, _EFFECTIVE_LOG_PATH
     if _LOGGING_CONFIGURED:
         return
 
-    config.log_path.parent.mkdir(parents=True, exist_ok=True)
+    preferred = config.log_path.expanduser()
+    _EFFECTIVE_LOG_PATH = _resolve_effective_log_path()
 
     app_level = _parse_log_level(config.log_level, logging.INFO)
     third_party_level = _parse_log_level(
@@ -98,7 +130,7 @@ def configure_logging() -> None:
     handler_level = min(app_level, third_party_level)
 
     handler = RotatingFileHandler(
-        config.log_path,
+        str(_EFFECTIVE_LOG_PATH),
         maxBytes=max(config.log_max_bytes, 1),
         backupCount=max(config.log_backup_count, 1),
         encoding="utf-8",
@@ -131,6 +163,19 @@ def configure_logging() -> None:
     logging.captureWarnings(True)
     atexit.register(_close_fault_log_stream)
     _LOGGING_CONFIGURED = True
+
+    try:
+        preferred_resolved = preferred.resolve()
+    except OSError:
+        preferred_resolved = preferred
+    if _EFFECTIVE_LOG_PATH != preferred_resolved:
+        logging.getLogger(__name__).warning(
+            "Could not use configured LOG_PATH %s (open failed or not permitted); "
+            "writing logs to %s instead. Other processes (e.g. Docker) may still "
+            "update the original file.",
+            preferred,
+            _EFFECTIVE_LOG_PATH,
+        )
 
 
 def configure_runtime_diagnostics() -> None:

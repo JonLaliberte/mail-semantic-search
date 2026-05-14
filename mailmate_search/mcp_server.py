@@ -1,10 +1,13 @@
 """FastMCP server exposing MailMate search tools."""
 
+import logging
+import sys
 from datetime import datetime
 from typing import Optional
 
 from fastmcp import FastMCP
 
+from mailmate_search.config import config
 from mailmate_search.runtime_logging import (
     configure_logging,
     configure_runtime_diagnostics,
@@ -15,6 +18,8 @@ from mailmate_search.search import (
     search_email_records_payload,
 )
 from mailmate_search.service_models import QueryRequest, SearchRequest
+
+logger = logging.getLogger(__name__)
 
 mcp = FastMCP(name="MailMate Search")
 
@@ -120,6 +125,33 @@ def main() -> None:
     """Run the MCP server over stdio."""
     configure_logging()
     configure_runtime_diagnostics()
+    logger.info(
+        "MCP startup paths: chromadb_path=%s database_path=%s mailmate_dir=%s",
+        config.chromadb_path,
+        config.database_path,
+        config.mailmate_email_dir,
+    )
+    try:
+        status = get_status_data_payload()
+        logger.info(
+            "MCP startup index: total_indexed_emails=%s total_emails=%s",
+            status.get("total_indexed_emails"),
+            status.get("total_emails"),
+        )
+    except Exception as exc:
+        hint = (
+            "This is usually the MCP *parent app* (not this repo) blocking access to the configured "
+            "database path—for example SQLite on `/Volumes/...` while Docker uses the same files "
+            "fine. Same single dataset: run MCP inside `docker compose` (see README: MCP via Docker) "
+            "or grant Full Disk Access to the MCP client."
+        )
+        msg = (
+            f"MCP startup: could not open the index for a status snapshot ({type(exc).__name__}: {exc}). "
+            f"The server will still start; search/get_status may fail until the process can open the DB. "
+            f"{hint}"
+        )
+        logger.warning(msg)
+        print(msg, file=sys.stderr)
     mcp.run()
 
 
