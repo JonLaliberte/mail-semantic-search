@@ -41,10 +41,11 @@ Local semantic search for email files using local embeddings and vector search.
    - Set `EMAIL_DIR` to your email messages directory
    - Adjust other settings as needed
 
-4. **Build the container image:**
+4. **Pull the published image** (or build from source):
    ```bash
-   docker compose build
+   docker compose pull
    ```
+   To build locally instead: `docker compose build`.
 
 5. **Index your emails:**
    ```bash
@@ -87,6 +88,38 @@ All configuration is done via the `.env` file:
 - `LOG_BACKUP_COUNT`: Number of rotated log files to retain (default: `5`)
 
 Normal CLI output stays in the terminal. Internal warnings, diagnostics, and traceback dumps are written to `LOG_PATH`.
+
+## Releases
+
+Tagged releases are published as multi-arch (amd64 + arm64) Docker images to GitHub Container Registry:
+
+```
+ghcr.io/jonlaliberte/mail-semantic-search
+```
+
+Available tags:
+- `:latest` — most recent stable release
+- `:0.2`, `:0.2.0` — minor and exact-version aliases
+
+For production, pin to an exact version in `docker-compose.yml`:
+
+```yaml
+image: ghcr.io/jonlaliberte/mail-semantic-search:0.2.0
+```
+
+Release notes (including the changelog generated from commits and PRs) live on the [GitHub Releases page](https://github.com/JonLaliberte/mail-semantic-search/releases).
+
+### Releasing a new version (maintainers)
+
+```bash
+# 1. Bump version in pyproject.toml, commit it
+# 2. Tag and push
+git tag -a v0.3.0 -m "Release 0.3.0"
+git push origin v0.3.0
+# 3. CI builds the multi-arch image, pushes to GHCR, and creates a GitHub Release
+```
+
+The first time a release is published the GHCR package will be private — flip it to Public once in the GitHub UI (Packages → Package settings → Change visibility). Subsequent publishes are automatic.
 
 ## Commands
 
