@@ -277,6 +277,31 @@ def _normalize_result(result: Dict) -> Dict:
     return normalized
 
 
+def _dedup_results_by_message_id(results: List[Dict]) -> List[Dict]:
+    """Collapse results with the same message_id, keeping the lowest distance.
+
+    Rows with empty/None message_id are always preserved as distinct results
+    because they cannot be correlated by content.
+    """
+    seen: Dict[str, int] = {}  # message_id -> index in output
+    output: List[Dict] = []
+    for result in results:
+        mid = result.get("message_id") or ""
+        if not mid:
+            output.append(result)
+            continue
+        if mid not in seen:
+            seen[mid] = len(output)
+            output.append(result)
+        else:
+            existing_idx = seen[mid]
+            existing_distance = output[existing_idx].get("distance") or 1.0
+            this_distance = result.get("distance") or 1.0
+            if this_distance < existing_distance:
+                output[existing_idx] = result
+    return output
+
+
 def search_email_records(request: SearchRequest) -> SearchResponse:
     """Run semantic search and return structured results."""
     resolved_request, parser_applied = _resolved_search_request(request)
@@ -406,6 +431,8 @@ def search_email_records(request: SearchRequest) -> SearchResponse:
                     results.append(_normalize_result(merged))
                 else:
                     results.append(_normalize_result(candidate))
+
+        results = _dedup_results_by_message_id(results)
 
         rerank_applied = False
         if rerank_enabled and results:

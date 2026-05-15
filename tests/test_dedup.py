@@ -196,6 +196,28 @@ def test_dedup_by_message_id_noop_when_no_duplicates(tmp_path, monkeypatch):
     db.close()
 
 
+def test_dedup_results_by_message_id():
+    from mail_semantic_search.search import _dedup_results_by_message_id
+
+    results = [
+        {"message_id": "<a@x>", "distance": 0.1, "file_path": "/a1.eml"},
+        {"message_id": "<a@x>", "distance": 0.3, "file_path": "/a2.eml"},  # worse
+        {"message_id": "<b@x>", "distance": 0.2, "file_path": "/b.eml"},
+        {"message_id": "",      "distance": 0.05, "file_path": "/c.eml"},  # no id
+        {"message_id": "",      "distance": 0.07, "file_path": "/d.eml"},  # no id
+    ]
+
+    deduped = _dedup_results_by_message_id(results)
+
+    # Both empty-message_id rows kept; best <a@x> kept; <b@x> kept
+    file_paths = [r["file_path"] for r in deduped]
+    assert "/a1.eml" in file_paths       # best score
+    assert "/a2.eml" not in file_paths   # worse dupe removed
+    assert "/b.eml" in file_paths
+    assert "/c.eml" in file_paths        # no-id rows always kept
+    assert "/d.eml" in file_paths
+
+
 def test_handle_move_detection_replaces_old_path(tmp_path, monkeypatch):
     """When a new file has a message_id already in DB at a different path,
     the old DB+Chroma entry should be removed and the new path NOT yet in DB."""
