@@ -194,3 +194,47 @@ def test_dedup_by_message_id_noop_when_no_duplicates(tmp_path, monkeypatch):
     assert db.email_exists("/emails/unique2.eml")
 
     db.close()
+
+
+def test_handle_move_detection_replaces_old_path(tmp_path, monkeypatch):
+    """When a new file has a message_id already in DB at a different path,
+    the old DB+Chroma entry should be removed and the new path NOT yet in DB."""
+    import mail_semantic_search.config as cfg_mod
+    from mail_semantic_search.database import Database
+    from mail_semantic_search.vector_store import VectorStore
+
+    monkeypatch.setattr(cfg_mod.config, "database_path", tmp_path / "move.db")
+    monkeypatch.setattr(cfg_mod.config, "chromadb_path", tmp_path / "move_chroma")
+
+    db = Database()
+    vs = VectorStore()
+
+    # Index the "old" file path with a known message_id
+    db.add_email(
+        {"file_path": "/emails/old.eml", "message_id": "<move@x>", "subject": "moved",
+         "from": "a@x.com", "to": "b@x.com", "cc": "", "bcc": "",
+         "date": "2024-01-01", "body": "Body"},
+        attachments=[],
+        file_mtime=1000.0,
+    )
+    vs.add_emails(
+        [{"file_path": "/emails/old.eml", "subject": "moved", "from": "a@x.com",
+          "to": "b@x.com", "date": "2024-01-01", "message_id": "<move@x>",
+          "attachments": []}],
+        [[0.1] * 768],
+    )
+
+    # Call move detection for the new path (not yet in DB)
+    from mail_semantic_search.index import _handle_move_detection
+    moved = _handle_move_detection(
+        {"file_path": "/emails/new.eml", "message_id": "<move@x>"},
+        db,
+        vs,
+    )
+
+    assert moved is True
+    assert not db.email_exists("/emails/old.eml")   # old path removed from SQLite
+    assert not vs.is_indexed("/emails/old.eml")     # old path removed from Chroma
+    assert not db.email_exists("/emails/new.eml")   # new path NOT yet indexed (caller's job)
+
+    db.close()

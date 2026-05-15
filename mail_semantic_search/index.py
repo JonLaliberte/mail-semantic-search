@@ -226,6 +226,49 @@ def combine_email_text(email: Dict[str, Any]) -> str:
     return "\n".join(text_parts).strip()
 
 
+def _handle_move_detection(
+    email: Dict[str, Any],
+    database: Database,
+    vector_store: VectorStore,
+) -> bool:
+    """Check if email's message_id is already indexed at a different path.
+
+    If so, deletes the old SQLite row and Chroma vector so the caller can
+    index the new path cleanly. Returns True if a move was detected and
+    cleaned up, False otherwise.
+
+    Skips empty/None message_id — those cannot be correlated by content.
+    """
+    message_id = email.get("message_id")
+    if not message_id:
+        return False
+
+    existing = database.get_email_by_message_id(message_id)
+    if existing is None:
+        return False
+
+    old_path = existing["file_path"]
+    if old_path == email["file_path"]:
+        return False
+
+    logger.info(
+        "Move detected: message_id=%s old_path=%s new_path=%s",
+        message_id,
+        old_path,
+        email["file_path"],
+    )
+    database.delete_email_by_file_path(old_path)
+    try:
+        vector_store.delete_email(old_path)
+    except Exception as exc:
+        logger.warning(
+            "Could not delete old Chroma vector for moved email %s: %s",
+            old_path,
+            exc,
+        )
+    return True
+
+
 def index_emails(
     limit: Optional[int] = None,
     skip_indexed: bool = True,
@@ -348,7 +391,12 @@ def index_emails(
                         if vector_store.is_indexed(email["file_path"]):
                             # Still need to update if file changed, so continue
                             pass
-                        
+
+                        # Move detection: if this file_path is new but its
+                        # message_id is already indexed at another path,
+                        # delete the stale entry before re-indexing.
+                        _handle_move_detection(email, database, vector_store)
+
                         emails_to_index.append(email)
                 else:
                     emails_to_index = batch
