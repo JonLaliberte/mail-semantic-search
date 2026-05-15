@@ -1,6 +1,7 @@
 """FastMCP server exposing mail-semantic-search tools."""
 
 import logging
+import subprocess
 import sys
 from datetime import datetime
 from typing import Optional
@@ -14,10 +15,11 @@ from mail_semantic_search.runtime_logging import (
 )
 from mail_semantic_search.search import (
     get_status_data_payload,
+    list_inbox_emails_payload,
     query_email_records_payload,
     search_email_records_payload,
 )
-from mail_semantic_search.service_models import QueryRequest, SearchRequest
+from mail_semantic_search.service_models import InboxRequest, QueryRequest, SearchRequest
 
 logger = logging.getLogger(__name__)
 
@@ -119,6 +121,39 @@ def query_emails(
 def get_status() -> dict:
     """Return indexing status and configuration summary."""
     return get_status_data_payload()
+
+
+@mcp.tool
+def list_inbox_emails(
+    limit: int = 50,
+    account: Optional[str] = None,
+    date_after: Optional[str] = None,
+    date_before: Optional[str] = None,
+) -> dict:
+    """List emails currently in any IMAP INBOX, newest first."""
+    return list_inbox_emails_payload(
+        InboxRequest(
+            limit=limit,
+            account=account,
+            date_after=_parse_mcp_date(date_after),
+            date_before=_parse_mcp_date(date_before),
+        )
+    )
+
+
+@mcp.tool
+def open_email_url(message_url: str) -> dict:
+    """Open a message:// URL with the OS-default handler."""
+    result = subprocess.run(
+        ["open", message_url],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"`open` exited with code {result.returncode}: {result.stderr.strip()}"
+        )
+    return {"opened": message_url}
 
 
 def main() -> None:

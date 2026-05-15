@@ -63,6 +63,24 @@ class QueryResponse:
 
 
 @dataclass
+class InboxRequest:
+    """Structured request to list inbox emails."""
+
+    limit: int = 50
+    account: Optional[str] = None
+    date_after: Optional[datetime] = None
+    date_before: Optional[datetime] = None
+
+
+@dataclass
+class InboxResponse:
+    """Structured inbox listing response."""
+
+    filters: Dict[str, Any]
+    results: List[Dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
 class StatusResponse:
     """Structured status payload."""
 

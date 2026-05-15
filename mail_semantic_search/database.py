@@ -532,6 +532,71 @@ class Database:
         
         return results
 
+    def list_inbox_emails(
+        self,
+        limit: int = 50,
+        account: Optional[str] = None,
+        date_after: Optional[datetime] = None,
+        date_before: Optional[datetime] = None,
+    ) -> List[Dict]:
+        """Return inbox emails newest-first with a short body snippet.
+
+        Inbox detection is path-based: MailMate stores INBOX messages under a
+        `/INBOX.mailbox/` path segment, while archived mail lives elsewhere
+        (e.g. `[Gmail].mailbox/All Mail.mailbox/`). `account` accepts the bare
+        email form and is URL-encoded (`@` -> `%40`) to match the on-disk path.
+        Date bounds are strict (`date > date_after`, `date < date_before`) so a
+        caller can page by feeding the oldest result's date back as
+        `date_before`.
+        """
+        # Clamp limit to [1, 500] to match documented behavior.
+        clamped_limit = max(1, min(limit, 500))
+
+        sql_parts = [
+            "SELECT id, message_id, from_addr, to_addrs, subject, date,",
+            "       has_attachments, body_preview",
+            "FROM emails",
+            "WHERE file_path LIKE ?",
+        ]
+        params: list = ["%/INBOX.mailbox/%"]
+
+        if account:
+            account_encoded = account.replace("@", "%40")
+            sql_parts.append("AND file_path LIKE ?")
+            params.append(f"%{account_encoded}%/INBOX.mailbox/%")
+
+        if date_after is not None:
+            sql_parts.append("AND date > ?")
+            params.append(date_after)
+
+        if date_before is not None:
+            sql_parts.append("AND date < ?")
+            params.append(date_before)
+
+        sql_parts.append("ORDER BY date DESC")
+        sql_parts.append("LIMIT ?")
+        params.append(clamped_limit)
+
+        cursor = self.conn.cursor()
+        cursor.execute("\n".join(sql_parts), params)
+
+        results: List[Dict] = []
+        for row in cursor.fetchall():
+            preview = row["body_preview"] or ""
+            results.append(
+                {
+                    "id": row["id"],
+                    "message_id": row["message_id"],
+                    "from": row["from_addr"],
+                    "to": row["to_addrs"],
+                    "subject": row["subject"],
+                    "date": row["date"],
+                    "has_attachments": bool(row["has_attachments"]),
+                    "body_snippet": preview[:200],
+                }
+            )
+        return results
+
     def get_stats(self) -> Dict:
         """Get database statistics."""
         cursor = self.conn.cursor()

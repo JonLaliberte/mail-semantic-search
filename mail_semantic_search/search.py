@@ -11,6 +11,8 @@ from mail_semantic_search.query_parser import LocalQueryParser
 from mail_semantic_search.query import QueryBuilder
 from mail_semantic_search.reranker import CrossEncoderReranker
 from mail_semantic_search.service_models import (
+    InboxRequest,
+    InboxResponse,
     QueryRequest,
     QueryResponse,
     SearchRequest,
@@ -562,5 +564,26 @@ def query_email_records_payload(request: QueryRequest) -> Dict:
 def get_status_data_payload() -> Dict:
     """Return status response as a JSON-friendly dict."""
     return asdict(get_status_data())
+
+
+def list_inbox_emails_payload(request: InboxRequest) -> Dict:
+    """Return inbox listing as a JSON-friendly dict."""
+    with Database() as database:
+        rows = database.list_inbox_emails(
+            limit=request.limit,
+            account=request.account,
+            date_after=request.date_after,
+            date_before=request.date_before,
+        )
+    response = InboxResponse(
+        filters={
+            "account": request.account,
+            "limit": request.limit,
+            "date_after": request.date_after.isoformat() if request.date_after else None,
+            "date_before": request.date_before.isoformat() if request.date_before else None,
+        },
+        results=rows,
+    )
+    return asdict(response)
 
 
