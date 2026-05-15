@@ -288,7 +288,7 @@ class Database:
         if commit:
             self.conn.commit()
 
-    def dedup_by_message_id(self, vector_store) -> tuple[int, int]:
+    def dedup_by_message_id(self, vector_store) -> Tuple[int, int]:
         """Remove duplicate emails keeping the most-recently indexed per message_id.
 
         Skips rows where message_id is NULL or empty — those cannot be correlated.
@@ -334,6 +334,30 @@ class Database:
             kept += 1
         self.conn.commit()
         return removed, kept
+
+    def count_duplicate_message_ids(self) -> Tuple[int, int]:
+        """Count message_ids that have duplicates and total rows that would be removed.
+
+        Returns:
+            (group_count, rows_to_remove) — groups with duplicates and surplus row count
+        """
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            SELECT COUNT(*) AS cnt
+            FROM emails
+            WHERE message_id IS NOT NULL AND message_id != ''
+            GROUP BY message_id
+            HAVING cnt > 1
+            """
+        )
+        counts = cursor.fetchall()
+        group_count = len(counts)
+        rows_to_remove = sum(
+            (row["cnt"] if isinstance(row, sqlite3.Row) else row[0]) - 1
+            for row in counts
+        )
+        return group_count, rows_to_remove
 
     def add_email(
         self,

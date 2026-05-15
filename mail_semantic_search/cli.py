@@ -318,22 +318,9 @@ def dedup(dry_run: bool):
     try:
         with Database() as database, VectorStore() as vector_store:
             if dry_run:
-                cursor = database.conn.cursor()
-                cursor.execute(
-                    """
-                    SELECT message_id, COUNT(*) AS cnt
-                    FROM emails
-                    WHERE message_id IS NOT NULL AND message_id != ''
-                    GROUP BY message_id
-                    HAVING cnt > 1
-                    """
-                )
-                groups = cursor.fetchall()
-                total_dupes = sum(
-                    (g["cnt"] if hasattr(g, "keys") else g[1]) - 1 for g in groups
-                )
+                groups, total_dupes = database.count_duplicate_message_ids()
                 click.echo(
-                    f"Dry run: {len(groups)} message_ids have duplicates, "
+                    f"Dry run: {groups} message_ids have duplicates, "
                     f"{total_dupes} rows would be removed."
                 )
                 return

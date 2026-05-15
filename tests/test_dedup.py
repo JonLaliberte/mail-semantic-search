@@ -171,3 +171,26 @@ def test_dedup_by_message_id_skips_empty_message_id(tmp_path, monkeypatch):
     assert db.email_exists("/emails/noid2.eml")
 
     db.close()
+
+
+def test_dedup_by_message_id_noop_when_no_duplicates(tmp_path, monkeypatch):
+    """dedup returns (0, 0) when there are no duplicate message_ids."""
+    import mail_semantic_search.config as cfg_mod
+    from mail_semantic_search.vector_store import VectorStore
+
+    monkeypatch.setattr(cfg_mod.config, "chromadb_path", tmp_path / "chroma3")
+
+    db = Database(tmp_path / "dedup3.db")
+    vs = VectorStore()
+
+    _add_email(db, "/emails/unique1.eml", "<unique1@x>", subject="unique 1")
+    _add_email(db, "/emails/unique2.eml", "<unique2@x>", subject="unique 2")
+
+    removed, kept = db.dedup_by_message_id(vs)
+
+    assert removed == 0
+    assert kept == 0
+    assert db.email_exists("/emails/unique1.eml")
+    assert db.email_exists("/emails/unique2.eml")
+
+    db.close()
