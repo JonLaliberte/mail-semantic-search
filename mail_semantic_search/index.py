@@ -238,6 +238,10 @@ def _handle_move_detection(
     cleaned up, False otherwise.
 
     Skips empty/None message_id — those cannot be correlated by content.
+
+    Note: SQLite deletion commits before Chroma deletion. If the process is killed
+    between the two, the Chroma vector becomes an orphan. Search-time dedup (Task 5)
+    handles orphaned vectors gracefully.
     """
     message_id = email.get("message_id")
     if not message_id:
@@ -258,14 +262,8 @@ def _handle_move_detection(
         email["file_path"],
     )
     database.delete_email_by_file_path(old_path)
-    try:
-        vector_store.delete_email(old_path)
-    except Exception as exc:
-        logger.warning(
-            "Could not delete old Chroma vector for moved email %s: %s",
-            old_path,
-            exc,
-        )
+    # VectorStore.delete_email swallows ChromaError internally; no wrapper needed here.
+    vector_store.delete_email(old_path)
     return True
 
 
