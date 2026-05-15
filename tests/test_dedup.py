@@ -103,3 +103,71 @@ def test_vector_store_delete_email_removes_entry(tmp_path, monkeypatch):
 
     # Verify idempotent: deleting non-existent path must not raise
     vs.delete_email("/emails/never_indexed.eml")
+
+
+def test_dedup_by_message_id_removes_older_duplicate(tmp_path, monkeypatch):
+    """dedup keeps the most-recently indexed row for each message_id."""
+    import mail_semantic_search.config as cfg_mod
+    from mail_semantic_search.vector_store import VectorStore
+
+    monkeypatch.setattr(cfg_mod.config, "chromadb_path", tmp_path / "chroma")
+
+    db = Database(tmp_path / "dedup.db")
+    vs = VectorStore()
+
+    # Add two rows with same message_id — simulate a moved email
+    _add_email(db, "/emails/old.eml", "<dup@x>", subject="old")
+    # Force indexed_at to be older
+    db.conn.execute(
+        "UPDATE emails SET indexed_at = '2024-01-01 00:00:00' WHERE file_path = ?",
+        ("/emails/old.eml",),
+    )
+    db.conn.commit()
+
+    _add_email(db, "/emails/new.eml", "<dup@x>", subject="new")
+
+    # Add both to Chroma
+    fake_emb = [0.1] * 768
+    vs.add_emails(
+        [{"file_path": "/emails/old.eml", "subject": "old", "from": "a@x.com",
+          "to": "b@x.com", "date": "2024-01-01", "message_id": "<dup@x>", "attachments": []}],
+        [fake_emb],
+    )
+    vs.add_emails(
+        [{"file_path": "/emails/new.eml", "subject": "new", "from": "a@x.com",
+          "to": "b@x.com", "date": "2024-01-01", "message_id": "<dup@x>", "attachments": []}],
+        [fake_emb],
+    )
+
+    removed, kept = db.dedup_by_message_id(vs)
+
+    assert removed == 1
+    assert kept == 1
+    assert not db.email_exists("/emails/old.eml")
+    assert db.email_exists("/emails/new.eml")
+    assert not vs.is_indexed("/emails/old.eml")
+    assert vs.is_indexed("/emails/new.eml")
+
+    db.close()
+
+
+def test_dedup_by_message_id_skips_empty_message_id(tmp_path, monkeypatch):
+    """Rows with NULL/empty message_id must not be deduped against each other."""
+    import mail_semantic_search.config as cfg_mod
+    from mail_semantic_search.vector_store import VectorStore
+
+    monkeypatch.setattr(cfg_mod.config, "chromadb_path", tmp_path / "chroma2")
+
+    db = Database(tmp_path / "dedup2.db")
+    vs = VectorStore()
+
+    _add_email(db, "/emails/noid1.eml", "", subject="no id 1")
+    _add_email(db, "/emails/noid2.eml", "", subject="no id 2")
+
+    removed, kept = db.dedup_by_message_id(vs)
+
+    assert removed == 0
+    assert db.email_exists("/emails/noid1.eml")
+    assert db.email_exists("/emails/noid2.eml")
+
+    db.close()

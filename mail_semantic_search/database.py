@@ -288,6 +288,53 @@ class Database:
         if commit:
             self.conn.commit()
 
+    def dedup_by_message_id(self, vector_store) -> tuple[int, int]:
+        """Remove duplicate emails keeping the most-recently indexed per message_id.
+
+        Skips rows where message_id is NULL or empty — those cannot be correlated.
+
+        Returns:
+            (removed_count, kept_count)
+        """
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            SELECT message_id, COUNT(*) AS cnt
+            FROM emails
+            WHERE message_id IS NOT NULL AND message_id != ''
+            GROUP BY message_id
+            HAVING cnt > 1
+            """
+        )
+        duplicate_groups = cursor.fetchall()
+
+        removed = 0
+        kept = 0
+        for row in duplicate_groups:
+            mid = row["message_id"] if isinstance(row, sqlite3.Row) else row[0]
+            cursor.execute(
+                """
+                SELECT id, file_path, indexed_at
+                FROM emails
+                WHERE message_id = ?
+                ORDER BY indexed_at DESC
+                """,
+                (mid,),
+            )
+            duplicates = cursor.fetchall()
+            # Keep the first (most recent), delete the rest
+            for dup in duplicates[1:]:
+                fp = dup["file_path"] if isinstance(dup, sqlite3.Row) else dup[1]
+                self.delete_email_by_file_path(fp, commit=False)
+                try:
+                    vector_store.delete_email(fp)
+                except Exception as e:
+                    logger.warning("Could not delete Chroma vector for %s: %s", fp, e)
+                removed += 1
+            kept += 1
+        self.conn.commit()
+        return removed, kept
+
     def add_email(
         self,
         email_data: Dict,

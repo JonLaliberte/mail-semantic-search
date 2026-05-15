@@ -8,7 +8,9 @@ from typing import Optional, Tuple
 
 import click
 
+from mail_semantic_search.database import Database
 from mail_semantic_search.index import index_emails
+from mail_semantic_search.vector_store import VectorStore
 from mail_semantic_search.runtime_logging import (
     configure_logging,
     configure_runtime_diagnostics,
@@ -297,6 +299,52 @@ def status():
         handle_error(f"Database error: {e}", log_exception=True)
     except (OSError, RuntimeError, ValueError, TypeError) as e:
         handle_error(f"Failed to get status: {e}", log_exception=True)
+
+
+@main.command()
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Report duplicates without deleting anything",
+)
+def dedup(dry_run: bool):
+    """Remove duplicate index entries for the same Message-ID.
+
+    Keeps the most recently indexed copy and deletes all others from both
+    SQLite and ChromaDB. Rows with no Message-ID are left untouched.
+
+    Safe to run multiple times (idempotent).
+    """
+    try:
+        with Database() as database, VectorStore() as vector_store:
+            if dry_run:
+                cursor = database.conn.cursor()
+                cursor.execute(
+                    """
+                    SELECT message_id, COUNT(*) AS cnt
+                    FROM emails
+                    WHERE message_id IS NOT NULL AND message_id != ''
+                    GROUP BY message_id
+                    HAVING cnt > 1
+                    """
+                )
+                groups = cursor.fetchall()
+                total_dupes = sum(
+                    (g["cnt"] if hasattr(g, "keys") else g[1]) - 1 for g in groups
+                )
+                click.echo(
+                    f"Dry run: {len(groups)} message_ids have duplicates, "
+                    f"{total_dupes} rows would be removed."
+                )
+                return
+
+            click.echo("Scanning for duplicate message_ids...")
+            removed, kept = database.dedup_by_message_id(vector_store)
+            click.echo(f"Done. Removed {removed} duplicate(s), kept {kept} unique message_id(s).")
+    except sqlite3.Error as e:
+        handle_error(f"Database error: {e}", log_exception=True)
+    except (OSError, RuntimeError, ValueError, TypeError) as e:
+        handle_error(f"Dedup failed: {e}", log_exception=True)
 
 
 if __name__ == "__main__":
