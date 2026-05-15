@@ -316,7 +316,7 @@ def search_email_records(request: SearchRequest) -> SearchResponse:
     retrieval_candidate_count = (
         max(final_result_count, config.rerank_max_candidates)
         if rerank_enabled
-        else final_result_count
+        else final_result_count * 2
     )
 
     with Database() as database, VectorStore() as vector_store:

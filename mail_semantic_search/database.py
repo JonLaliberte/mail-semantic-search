@@ -310,7 +310,7 @@ class Database:
 
         removed = 0
         kept = 0
-        for row in duplicate_groups:
+        for i, row in enumerate(duplicate_groups):
             mid = row["message_id"] if isinstance(row, sqlite3.Row) else row[0]
             cursor.execute(
                 """
@@ -326,12 +326,12 @@ class Database:
             for dup in duplicates[1:]:
                 fp = dup["file_path"] if isinstance(dup, sqlite3.Row) else dup[1]
                 self.delete_email_by_file_path(fp, commit=False)
-                try:
-                    vector_store.delete_email(fp)
-                except Exception as e:
-                    logger.warning("Could not delete Chroma vector for %s: %s", fp, e)
+                vector_store.delete_email(fp)
                 removed += 1
             kept += 1
+            if (i + 1) % 1000 == 0:
+                self.conn.commit()
+                logger.info("dedup progress: %d/%d groups processed, %d rows removed so far", i + 1, len(duplicate_groups), removed)
         self.conn.commit()
         return removed, kept
 
