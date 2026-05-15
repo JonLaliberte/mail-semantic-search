@@ -208,14 +208,31 @@ def test_dedup_results_by_message_id():
     ]
 
     deduped = _dedup_results_by_message_id(results)
-
-    # Both empty-message_id rows kept; best <a@x> kept; <b@x> kept
     file_paths = [r["file_path"] for r in deduped]
+
+    assert len(deduped) == 4
     assert "/a1.eml" in file_paths       # best score
     assert "/a2.eml" not in file_paths   # worse dupe removed
     assert "/b.eml" in file_paths
     assert "/c.eml" in file_paths        # no-id rows always kept
     assert "/d.eml" in file_paths
+
+
+def test_dedup_results_by_message_id_best_arrives_second():
+    """Replacement fires when the better-scoring duplicate appears later in the list."""
+    from mail_semantic_search.search import _dedup_results_by_message_id
+
+    results = [
+        {"message_id": "<z@x>", "distance": 0.5, "file_path": "/z_worse.eml"},
+        {"message_id": "<z@x>", "distance": 0.1, "file_path": "/z_better.eml"},  # better, arrives second
+    ]
+
+    deduped = _dedup_results_by_message_id(results)
+    file_paths = [r["file_path"] for r in deduped]
+
+    assert len(deduped) == 1
+    assert "/z_better.eml" in file_paths
+    assert "/z_worse.eml" not in file_paths
 
 
 def test_handle_move_detection_replaces_old_path(tmp_path, monkeypatch):

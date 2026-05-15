@@ -295,8 +295,10 @@ def _dedup_results_by_message_id(results: List[Dict]) -> List[Dict]:
             output.append(result)
         else:
             existing_idx = seen[mid]
-            existing_distance = output[existing_idx].get("distance") or 1.0
-            this_distance = result.get("distance") or 1.0
+            existing_d = output[existing_idx].get("distance")
+            existing_distance = existing_d if existing_d is not None else 1.0
+            this_d = result.get("distance")
+            this_distance = this_d if this_d is not None else 1.0
             if this_distance < existing_distance:
                 output[existing_idx] = result
     return output
