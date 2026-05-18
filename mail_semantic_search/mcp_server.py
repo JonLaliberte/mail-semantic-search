@@ -1,7 +1,6 @@
 """FastMCP server exposing mail-semantic-search tools."""
 
 import logging
-import subprocess
 import sys
 from datetime import datetime
 from typing import Optional
@@ -139,21 +138,6 @@ def list_inbox_emails(
             date_before=_parse_mcp_date(date_before),
         )
     )
-
-
-@mcp.tool
-def open_email_url(message_url: str) -> dict:
-    """Open a message:// URL with the OS-default handler."""
-    result = subprocess.run(
-        ["open", message_url],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"`open` exited with code {result.returncode}: {result.stderr.strip()}"
-        )
-    return {"opened": message_url}
 
 
 def main() -> None:

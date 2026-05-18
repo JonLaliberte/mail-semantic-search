@@ -165,7 +165,6 @@ Recommended initial MCP tools:
 - `search_emails`: semantic search with optional auto-filters and reranking
 - `query_emails`: metadata-only lookup
 - `list_inbox_emails`: newest-first inbox listing with optional account / date-range pagination (caller pages by feeding the oldest result's `date` back as `date_before`)
-- `open_email_url`: open a `message://` URL with the OS-default mail client
 - `get_status`: index and configuration summary
 
 ### Claude Desktop (macOS)
