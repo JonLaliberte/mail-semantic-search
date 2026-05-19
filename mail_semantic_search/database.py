@@ -257,6 +257,21 @@ class Database:
         cursor.execute("SELECT 1 FROM emails WHERE file_path = ?", (file_path,))
         return cursor.fetchone() is not None
 
+    def get_indexed_mtime(self, file_path: str) -> Optional[float]:
+        """Return the stored file_mtime for this path, or None if not indexed.
+
+        Used by the indexer to cheaply qualify candidates (stat + mtime compare)
+        before paying the cost of parsing the .eml file and its attachments.
+        """
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT file_mtime FROM emails WHERE file_path = ?", (file_path,)
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        return row["file_mtime"]
+
     def get_email_by_file_hash(self, file_hash: str) -> Optional[Dict]:
         """Get email record by file hash."""
         cursor = self.conn.cursor()

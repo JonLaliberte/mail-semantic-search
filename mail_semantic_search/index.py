@@ -18,6 +18,7 @@ from mail_semantic_search.embedding_service import EmbeddingService
 from mail_semantic_search.mailmate_reader import (
     count_eml_files,
     get_reader_status,
+    parse_email_file,
     read_emails_batch,
 )
 from mail_semantic_search.runtime_logging import dump_runtime_traceback
@@ -294,24 +295,11 @@ def index_emails(
 
     # Initialize services with context managers for proper cleanup
     with Database() as database, VectorStore() as vector_store:
-        embedding_service = EmbeddingService()
-        diagnostics = IndexDiagnostics(
-            enabled=config.index_runtime_diagnostics,
-            heartbeat_seconds=config.index_heartbeat_seconds,
-            stall_dump_seconds=config.index_stall_dump_seconds,
-        )
-
         # Get stats before indexing
         stats_before = vector_store.get_stats()
         db_stats_before = database.get_stats()
         print(f"Already indexed: {stats_before['total_emails']} emails in ChromaDB")
         print(f"Already indexed: {db_stats_before['total_emails']} emails in database")
-
-        total_indexed = 0
-        total_skipped = 0
-        total_seen = 0
-        batch_failures = 0
-        run_interrupted = False
 
         date_cutoff = None
         if incremental and skip_indexed:
@@ -342,6 +330,57 @@ def index_emails(
             progress_total = count_eml_files(email_dir, modified_after=date_cutoff)
             print(f"Candidate emails to process: {progress_total}")
 
+        # No-op fast path: when we know up front there are zero candidates,
+        # advance the watermark and exit before loading the embedding model.
+        # Only safe when limit is None (with a limit, progress_total is just
+        # the bar ceiling and tells us nothing about actual candidate count).
+        if limit is None and progress_total == 0:
+            print("No new emails to index.")
+            if incremental and skip_indexed:
+                watermark = datetime.now()
+                database.set_incremental_scan_watermark(watermark)
+                print(
+                    "Updated incremental scan watermark to: "
+                    f"{watermark.isoformat()}"
+                )
+            return
+
+        # Load the embedding model and start diagnostics only when there is
+        # actual work to do — this is the dominant cost on no-op invocations.
+        embedding_service = EmbeddingService()
+        diagnostics = IndexDiagnostics(
+            enabled=config.index_runtime_diagnostics,
+            heartbeat_seconds=config.index_heartbeat_seconds,
+            stall_dump_seconds=config.index_stall_dump_seconds,
+        )
+
+        total_indexed = 0
+        total_skipped = 0
+        total_seen = 0
+        batch_failures = 0
+        run_interrupted = False
+
+        # Pre-parse skip filter: stat each candidate and compare its mtime
+        # against the stored row. Saves the cost of parse_email_file (HTML
+        # strip, quoted-reply removal, attachment text extraction) for files
+        # we'd discard anyway. Mutates the closed-over counter so we can
+        # report total_skipped at the end.
+        skipped_counter = [0]
+
+        def _skip_unchanged(path: Path) -> bool:
+            try:
+                stored_mtime = database.get_indexed_mtime(str(path))
+                if stored_mtime is None:
+                    return False
+                if path.stat().st_mtime == stored_mtime:
+                    skipped_counter[0] += 1
+                    return True
+            except (OSError, IOError) as e:
+                logger.debug(f"Could not check mtime for {path}: {e}")
+            return False
+
+        skip_callback = _skip_unchanged if skip_indexed else None
+
         # Process emails in batches
         batch_iter = read_emails_batch(
             email_dir,
@@ -350,6 +389,7 @@ def index_emails(
             modified_after=date_cutoff,
             total_candidates=progress_total if show_progress else None,
             max_emails=limit,
+            should_skip=skip_callback,
         )
 
         pbar = None
@@ -365,36 +405,17 @@ def index_emails(
 
                 diagnostics.start_batch(batch_number, batch)
                 total_seen += len(batch)
+                # The reader's should_skip callback has already filtered out
+                # path+mtime matches, so everything in `batch` is new or changed.
+                total_skipped = skipped_counter[0]
 
-                # Filter out already indexed emails if requested
+                # Run move detection on every batch member (cheap: one indexed
+                # query by message_id). Files yielded here are by definition
+                # not already at this path with matching mtime.
                 emails_to_index = []
                 if skip_indexed:
                     for email in batch:
-                        file_path = Path(email["file_path"])
-                        # Check if already indexed in database
-                        if database.email_exists(email["file_path"]):
-                            # Check file modification time
-                            try:
-                                current_mtime = file_path.stat().st_mtime
-                                file_hash = get_file_hash(email["file_path"])
-                                email_record = database.get_email_by_file_hash(file_hash)
-                                if email_record and email_record.get("file_mtime") == current_mtime:
-                                    total_skipped += 1
-                                    continue
-                            except (OSError, IOError) as e:
-                                # Issue #11: Specific exception for file operations
-                                logger.debug(f"Could not check file mtime for {email['file_path']}: {e}")
-                        
-                        # Also check ChromaDB
-                        if vector_store.is_indexed(email["file_path"]):
-                            # Still need to update if file changed, so continue
-                            pass
-
-                        # Move detection: if this file_path is new but its
-                        # message_id is already indexed at another path,
-                        # delete the stale entry before re-indexing.
                         _handle_move_detection(email, database, vector_store)
-
                         emails_to_index.append(email)
                 else:
                     emails_to_index = batch
@@ -484,6 +505,9 @@ def index_emails(
             diagnostics.stop()
             if pbar is not None:
                 pbar.close()
+            # Pick up any skips that occurred after the last yielded batch
+            # (the reader may skip trailing candidates with no batch boundary).
+            total_skipped = skipped_counter[0]
 
         if incremental and skip_indexed and not run_interrupted and batch_failures == 0:
             watermark = datetime.now()
@@ -508,3 +532,84 @@ def index_emails(
         print(f"Total attachments: {db_stats_after['total_attachments']}")
 
 
+def index_email_file(file_path: Path, force: bool = False) -> Dict[str, Any]:
+    """Index a single .eml file.
+
+    Args:
+        file_path: Path to the .eml file (must live under config.email_dir).
+        force: If True, re-embed and re-upsert even when the stored mtime matches.
+
+    Returns:
+        Dict with keys:
+          status: one of "indexed", "skipped", "moved", "not_found", "failed"
+          file_path: resolved path as string
+          message: human-readable detail
+    """
+    resolved = Path(file_path).expanduser().resolve()
+    result: Dict[str, Any] = {"status": "failed", "file_path": str(resolved), "message": ""}
+
+    if not resolved.exists():
+        result["status"] = "not_found"
+        result["message"] = f"File does not exist: {resolved}"
+        return result
+
+    email_dir = config.email_dir.resolve()
+    try:
+        resolved.relative_to(email_dir)
+    except ValueError:
+        result["message"] = f"File is outside EMAIL_DIR ({email_dir}): {resolved}"
+        return result
+
+    email_data = parse_email_file(resolved, base_dir=email_dir)
+    if email_data is None:
+        result["message"] = "parse_email_file returned None (unparseable or filtered)"
+        return result
+
+    with Database() as database, VectorStore() as vector_store:
+        if not force and database.email_exists(email_data["file_path"]):
+            try:
+                current_mtime = resolved.stat().st_mtime
+                file_hash = get_file_hash(email_data["file_path"])
+                existing = database.get_email_by_file_hash(file_hash)
+                if existing and existing.get("file_mtime") == current_mtime:
+                    result["status"] = "skipped"
+                    result["message"] = "Already indexed (mtime unchanged)"
+                    return result
+            except (OSError, IOError) as e:
+                logger.debug(f"Could not check mtime for {resolved}: {e}")
+
+        moved = _handle_move_detection(email_data, database, vector_store)
+
+        try:
+            file_mtime = resolved.stat().st_mtime
+        except OSError:
+            file_mtime = None
+
+        embedding_service = EmbeddingService()
+        text = combine_email_text(email_data)
+        embeddings = embedding_service.embed_texts([text])
+
+        try:
+            database.add_email(
+                email_data,
+                email_data.get("attachments", []),
+                file_mtime,
+                commit=False,
+            )
+            vector_store.add_emails([email_data], embeddings, [text])
+            database.commit()
+        except (sqlite3.Error, OSError, RuntimeError, ValueError, TypeError) as e:
+            try:
+                database.conn.rollback()
+            except sqlite3.Error:
+                pass
+            result["message"] = f"Indexing failed: {e}"
+            return result
+
+        result["status"] = "moved" if moved else "indexed"
+        result["message"] = (
+            "Re-indexed at new path (old entry deleted)"
+            if moved
+            else "Indexed"
+        )
+        return result

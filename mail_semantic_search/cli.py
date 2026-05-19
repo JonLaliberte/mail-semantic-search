@@ -9,7 +9,7 @@ from typing import Optional, Tuple
 import click
 
 from mail_semantic_search.database import Database
-from mail_semantic_search.index import index_emails
+from mail_semantic_search.index import index_email_file, index_emails
 from mail_semantic_search.vector_store import VectorStore
 from mail_semantic_search.runtime_logging import (
     configure_logging,
@@ -103,6 +103,31 @@ def index(limit: int, no_skip: bool, incremental: bool):
         handle_error(f"Database error: {e}", log_exception=True)
     except (OSError, RuntimeError, ValueError, TypeError) as e:
         handle_error(f"Indexing failed: {e}", log_exception=True)
+
+
+@main.command("index-file")
+@click.argument("file_path", type=click.Path(dir_okay=False))
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Re-embed and re-upsert even if the stored mtime matches",
+)
+def index_file(file_path: str, force: bool):
+    """Index a single .eml file (e.g. from a MailMate rule on new mail)."""
+    from pathlib import Path
+
+    try:
+        result = index_email_file(Path(file_path), force=force)
+    except sqlite3.Error as e:
+        handle_error(f"Database error: {e}", log_exception=True)
+        return
+    except (OSError, RuntimeError, ValueError, TypeError) as e:
+        handle_error(f"Indexing failed: {e}", log_exception=True)
+        return
+
+    click.echo(f"{result['status']}: {result['message']}")
+    if result["status"] in ("not_found", "failed"):
+        sys.exit(1)
 
 
 @main.command()

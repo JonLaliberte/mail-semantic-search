@@ -10,7 +10,7 @@ import threading
 from email.utils import parsedate_to_datetime
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterator, List, Optional, Tuple
+from typing import Callable, Dict, Iterator, List, Optional, Tuple
 
 from tqdm import tqdm
 try:
@@ -555,14 +555,22 @@ def read_emails_batch(
     modified_after: Optional[datetime] = None,
     total_candidates: Optional[int] = None,
     max_emails: Optional[int] = None,
+    should_skip: Optional[Callable[[Path], bool]] = None,
 ) -> Iterator[List[Dict]]:
     """Read emails in batches for efficient processing.
-    
+
     Issue #4: No longer pre-counts files (which required scanning twice).
     Uses an unknown-total progress bar instead.
+
+    Args:
+        should_skip: Optional fast pre-filter invoked once per candidate path
+            BEFORE parsing. Return True to skip the file (e.g. when path+mtime
+            already match an indexed row). Avoids the cost of parsing .eml +
+            attachment text for files we'd skip anyway.
     """
     batch = []
     processed_count = 0
+    skipped_pre_parse = 0
 
     pbar = None
     if show_progress:
@@ -570,6 +578,11 @@ def read_emails_batch(
 
     try:
         for file_path in scan_eml_files(directory, show_progress=False, modified_after=modified_after):
+            if should_skip is not None and should_skip(file_path):
+                skipped_pre_parse += 1
+                if pbar is not None:
+                    pbar.update(1)
+                continue
             _update_reader_status(current_file=file_path)
             email_data = parse_email_file(file_path, base_dir=directory)
             _update_reader_status(last_file=file_path)
@@ -611,6 +624,10 @@ def read_emails_batch(
         if pbar is not None:
             pbar.close()
         if show_progress:
-            logger.info(f"Processed {processed_count} emails")
+            logger.info(
+                "Processed %d emails (skipped %d unchanged before parse)",
+                processed_count,
+                skipped_pre_parse,
+            )
 
 
