@@ -556,6 +556,7 @@ def read_emails_batch(
     total_candidates: Optional[int] = None,
     max_emails: Optional[int] = None,
     should_skip: Optional[Callable[[Path], bool]] = None,
+    candidates: Optional[List[Path]] = None,
 ) -> Iterator[List[Dict]]:
     """Read emails in batches for efficient processing.
 
@@ -567,6 +568,12 @@ def read_emails_batch(
             BEFORE parsing. Return True to skip the file (e.g. when path+mtime
             already match an indexed row). Avoids the cost of parsing .eml +
             attachment text for files we'd skip anyway.
+        candidates: Optional precomputed list of candidate paths. When
+            provided, skips the internal scan_eml_files call — useful when
+            the caller already materialized the list (e.g. to feed both a
+            count and the iteration off a single filesystem walk, which is
+            critical on macOS Docker where each `find` over the maildir
+            costs ~80s).
     """
     batch = []
     processed_count = 0
@@ -576,8 +583,13 @@ def read_emails_batch(
     if show_progress:
         pbar = tqdm(total=total_candidates, desc="Reading emails", unit=" emails")
 
+    if candidates is not None:
+        path_iter: Iterator[Path] = iter(candidates)
+    else:
+        path_iter = scan_eml_files(directory, show_progress=False, modified_after=modified_after)
+
     try:
-        for file_path in scan_eml_files(directory, show_progress=False, modified_after=modified_after):
+        for file_path in path_iter:
             if should_skip is not None and should_skip(file_path):
                 skipped_pre_parse += 1
                 if pbar is not None:

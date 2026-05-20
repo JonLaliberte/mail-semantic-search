@@ -16,10 +16,10 @@ from mail_semantic_search.config import config
 from mail_semantic_search.database import Database, get_file_hash
 from mail_semantic_search.embedding_service import EmbeddingService
 from mail_semantic_search.mailmate_reader import (
-    count_eml_files,
     get_reader_status,
     parse_email_file,
     read_emails_batch,
+    scan_eml_files,
 )
 from mail_semantic_search.runtime_logging import dump_runtime_traceback
 from mail_semantic_search.vector_store import VectorStore
@@ -295,11 +295,10 @@ def index_emails(
 
     # Initialize services with context managers for proper cleanup
     with Database() as database, VectorStore() as vector_store:
-        # Get stats before indexing
-        stats_before = vector_store.get_stats()
-        db_stats_before = database.get_stats()
-        print(f"Already indexed: {stats_before['total_emails']} emails in ChromaDB")
-        print(f"Already indexed: {db_stats_before['total_emails']} emails in database")
+        # Pre-run get_stats() costs ~10s on Chroma collections with hundreds
+        # of thousands of rows when running under macOS Docker's filesystem
+        # shim. The "Already indexed: X emails" log line was nice-to-have,
+        # not load-bearing — we still print final totals at the end.
 
         date_cutoff = None
         if incremental and skip_indexed:
@@ -324,10 +323,18 @@ def index_emails(
                     "scanning all files and recording a watermark on success."
                 )
 
+        # Materialize the candidate list once. On macOS Docker, each `find`
+        # invocation over the maildir tree costs ~80s through the VirtIOFS
+        # shim, so we run it exactly once per index_emails call and reuse
+        # the result for both counting and iteration.
+        candidate_paths: List[Path] = list(
+            scan_eml_files(email_dir, show_progress=False, modified_after=date_cutoff)
+        )
+
         if limit is not None:
             progress_total = limit
         else:
-            progress_total = count_eml_files(email_dir, modified_after=date_cutoff)
+            progress_total = len(candidate_paths)
             print(f"Candidate emails to process: {progress_total}")
 
         # No-op fast path: when we know up front there are zero candidates,
@@ -345,9 +352,11 @@ def index_emails(
                 )
             return
 
-        # Load the embedding model and start diagnostics only when there is
-        # actual work to do — this is the dominant cost on no-op invocations.
-        embedding_service = EmbeddingService()
+        # Defer model load until the first batch that actually has work to
+        # embed. If every candidate gets filtered out by the should_skip
+        # callback, no batch reaches the embed step and the model never
+        # loads — turns "lots of candidates, nothing new" into a fast run.
+        embedding_service: Optional[EmbeddingService] = None
         diagnostics = IndexDiagnostics(
             enabled=config.index_runtime_diagnostics,
             heartbeat_seconds=config.index_heartbeat_seconds,
@@ -390,6 +399,7 @@ def index_emails(
             total_candidates=progress_total if show_progress else None,
             max_emails=limit,
             should_skip=skip_callback,
+            candidates=candidate_paths,
         )
 
         pbar = None
@@ -428,6 +438,16 @@ def index_emails(
 
                 if not emails_to_index:
                     continue
+
+                # Lazy-load the embedding model on the first batch with work.
+                # Kept outside the inner try/except so a load failure
+                # propagates and terminates the run cleanly (matching the
+                # behavior we'd have had with eager construction).
+                if embedding_service is None:
+                    diagnostics.set_phase(
+                        "loading_embedding_model", emails_to_index
+                    )
+                    embedding_service = EmbeddingService()
 
                 # Get file modification times
                 diagnostics.set_phase("collecting_mtimes", emails_to_index)
@@ -521,15 +541,18 @@ def index_emails(
                 "Incremental watermark not advanced because one or more batches failed."
             )
 
-        # Get final stats
-        stats_after = vector_store.get_stats()
-        db_stats_after = database.get_stats()
+        # Skip the final stats query when no rows were touched — it costs
+        # ~10s on a large Chroma collection through Docker's FS shim, and
+        # the totals would only repeat what we already know.
         print(f"\nIndexing complete!")
         print(f"Newly indexed: {total_indexed} emails")
         print(f"Skipped (already indexed): {total_skipped} emails")
-        print(f"Total indexed in ChromaDB: {stats_after['total_emails']} emails")
-        print(f"Total indexed in database: {db_stats_after['total_emails']} emails")
-        print(f"Total attachments: {db_stats_after['total_attachments']}")
+        if total_indexed > 0:
+            stats_after = vector_store.get_stats()
+            db_stats_after = database.get_stats()
+            print(f"Total indexed in ChromaDB: {stats_after['total_emails']} emails")
+            print(f"Total indexed in database: {db_stats_after['total_emails']} emails")
+            print(f"Total attachments: {db_stats_after['total_attachments']}")
 
 
 def index_email_file(file_path: Path, force: bool = False) -> Dict[str, Any]:
