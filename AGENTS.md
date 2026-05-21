@@ -35,6 +35,17 @@ Run a native invocation (mirrors what users do, much faster than Docker on macOS
 .venv/bin/mail-semantic-search-mcp
 ```
 
+### Testing the Docker image locally
+
+`docker-compose.yml` no longer carries a `build:` directive — `docker compose pull` and `docker compose run --rm` always use the published GHCR image. When you need to test a `Dockerfile` change before tagging a release, build directly and tag it as `:latest` so compose picks it up:
+
+```bash
+docker build -t ghcr.io/jonlaliberte/mail-semantic-search:latest .
+docker compose run --rm mail-semantic-search index --incremental
+```
+
+Re-pulling later restores the published image.
+
 ## Releasing a new version (maintainers)
 
 1. Bump `version` in `pyproject.toml` following semver:

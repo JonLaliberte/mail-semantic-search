@@ -43,11 +43,10 @@ Search your local email archive by **meaning** and by **metadata** — locally. 
    - Set `EMAIL_DIR` to your email messages directory
    - Adjust other settings as needed
 
-4. **Pull the published image** (or build from source):
+4. **Pull the published image:**
    ```bash
    docker compose pull
    ```
-   To build locally instead: `docker compose build`.
 
 5. **Index your emails:**
    ```bash

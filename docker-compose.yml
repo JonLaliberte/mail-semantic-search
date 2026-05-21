@@ -1,7 +1,6 @@
 services:
   mail-semantic-search:
     image: ghcr.io/jonlaliberte/mail-semantic-search:latest
-    build: .
     container_name: mail-semantic-search
     volumes:
       # Mount EMAIL_DIR at the same path inside the container as on the
