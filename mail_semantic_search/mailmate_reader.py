@@ -502,8 +502,14 @@ def scan_eml_files(
 def _scan_eml_files_find(directory: Path, modified_after: datetime) -> Iterator[Path]:
     """Use `find` to list .eml files newer than modified_after."""
     cutoff = modified_after.strftime("%Y-%m-%d %H:%M:%S")
+    # `-L` makes find follow symbolic links. Without it, when EMAIL_DIR
+    # itself is a symlink (e.g. macOS users symlinking the MailMate
+    # maildir to an external SSD), native runs return 0 results and
+    # silently advance the watermark. Docker bind-mounts resolve the
+    # symlink at mount time so the in-container path is real either way.
     command = [
         "find",
+        "-L",
         str(directory),
         "-type",
         "f",
