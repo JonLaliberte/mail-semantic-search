@@ -1,6 +1,6 @@
 # mail-semantic-search
 
-Local semantic search for email files using local embeddings and vector search.
+Search your local email archive by **meaning** and by **metadata** — locally. Combines vector search over message bodies and attachment text with structured filters (from / to / subject / date / has-attachments / attachment type / attachment name). Use it from the CLI or wire it into Claude Desktop and other MCP-aware agents so they can query your inbox like a database. No email data ever leaves your machine.
 
 ## Features
 
@@ -13,10 +13,12 @@ Local semantic search for email files using local embeddings and vector search.
 
 ## Requirements
 
-- Docker and Docker Compose
-- An email client that stores messages as .eml files (e.g. MailMate)
-- **Tested on:** Mac Mini M4, 24GB RAM
-- **Minimum recommended:** 16GB RAM (8GB may work for small collections); Apple Silicon or modern x86_64
+- macOS or Linux (developed and tested on macOS)
+- **Either** Docker + Docker Compose **or** Python 3.10+ for the native venv
+- An email client that stores messages as `.eml` files (e.g. MailMate)
+- 16 GB+ RAM recommended (8 GB may work for small archives); Apple Silicon or modern x86_64
+- Tested on: Mac Mini M4, 24 GB RAM
+- Disk for the index: roughly **~2.5 GB per 35 GB of email** (~700k messages) — split across embeddings (~2.1 GB), model files (~420 MB), and metadata (~100–200 MB)
 
 ## Quick Start
 
@@ -109,18 +111,6 @@ image: ghcr.io/jonlaliberte/mail-semantic-search:0.5.0
 
 Release notes (including the changelog generated from commits and PRs) live on the [GitHub Releases page](https://github.com/JonLaliberte/mail-semantic-search/releases).
 
-### Releasing a new version (maintainers)
-
-```bash
-# 1. Bump version in pyproject.toml, commit it
-# 2. Tag and push (use the version you just set)
-git tag -a v0.5.0 -m "Release 0.5.0"
-git push origin v0.5.0
-# 3. CI builds the multi-arch image, pushes to GHCR, and creates a GitHub Release
-```
-
-The first time a release is published the GHCR package will be private — flip it to Public once in the GitHub UI (Packages → Package settings → Change visibility). Subsequent publishes are automatic.
-
 ## Commands
 
 - `index`: Index emails from the configured email directory
@@ -149,8 +139,6 @@ Incremental behavior (`index --incremental`):
 - `status`: Show indexing status and statistics
 
 - `dedup`: Remove duplicate index entries that share the same `Message-ID`, keeping the most recently indexed copy. Run `--dry-run` first to preview.
-
-- `migrate-paths --old-prefix X --new-prefix Y`: Rewrite indexed `file_path` values from one prefix to another in both SQLite and Chroma. Reuses existing embeddings (no re-embed cost). Idempotent. Used when changing the host/container path layout — see [Upgrading](#upgrading-from-04x-or-earlier).
 
 ## MCP Server
 
@@ -319,40 +307,6 @@ For users who already have [Keyboard Maestro](https://www.keyboardmaestro.com/):
 4. Optionally pipe output to a log file by appending `>> /tmp/mail-semantic-search-index.log 2>&1`.
 
 No PATH issues since the full docker path is explicit.
-
-## Upgrading from 0.4.x or earlier
-
-Releases before `v0.5.0` bind-mounted the maildir into the container at a hardcoded `/emails` path, so `file_path` values in the index were `/emails/...` — usable only inside Docker. `v0.5.0` switched to mounting `${EMAIL_DIR}` at the same path it has on the host so Docker and native venv runs produce identical paths.
-
-If you indexed under an older version, your stored `file_path` values still start with `/emails/`. Run the one-shot migration command to rewrite them in both SQLite and Chroma (it reuses your existing embeddings, so there's no re-embed cost):
-
-```bash
-# 1. Back up first (APFS clone is near-instant on the same volume):
-cp -c -R /path/to/data /path/to/data.backup
-
-# 2. Preview the rewrite:
-.venv/bin/mail-semantic-search migrate-paths \
-  --old-prefix "/emails/" \
-  --new-prefix "$EMAIL_DIR/" \
-  --dry-run
-
-# 3. Apply it (~10 min natively, ~30 min in Docker for ~437k rows):
-.venv/bin/mail-semantic-search migrate-paths \
-  --old-prefix "/emails/" \
-  --new-prefix "$EMAIL_DIR/"
-```
-
-The command is idempotent — if interrupted, rerun it and it skips rows whose new IDs are already in Chroma.
-
-After migration, pull the new `docker-compose.yml`. Both `docker compose run --rm mail-semantic-search index --incremental` and `.venv/bin/mail-semantic-search index --incremental` should report `skipped=<most-of-them>` instead of re-parsing every candidate.
-
-## Storage Requirements
-
-For 35GB of email data (~700,000 emails):
-- Embeddings: ~2.1GB (with BGE-base-en-v1.5)
-- Model files: ~420MB
-- Metadata: ~100-200MB
-- **Total**: ~2.5GB additional storage
 
 ## Model Switching
 
