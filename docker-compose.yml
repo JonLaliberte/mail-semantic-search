@@ -19,7 +19,3 @@ services:
       - SEARCH_RESULTS=${SEARCH_RESULTS:-10}
     env_file:
       - .env
-    stdin_open: true
-    tty: true
-
-
