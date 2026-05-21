@@ -99,12 +99,12 @@ ghcr.io/jonlaliberte/mail-semantic-search
 
 Available tags:
 - `:latest` — most recent stable release
-- `:0.2`, `:0.2.0` — minor and exact-version aliases
+- `:0.5`, `:0.5.0` — minor and exact-version aliases (replace with whatever the current release is)
 
 For production, pin to an exact version in `docker-compose.yml`:
 
 ```yaml
-image: ghcr.io/jonlaliberte/mail-semantic-search:0.2.0
+image: ghcr.io/jonlaliberte/mail-semantic-search:0.5.0
 ```
 
 Release notes (including the changelog generated from commits and PRs) live on the [GitHub Releases page](https://github.com/JonLaliberte/mail-semantic-search/releases).
@@ -113,9 +113,9 @@ Release notes (including the changelog generated from commits and PRs) live on t
 
 ```bash
 # 1. Bump version in pyproject.toml, commit it
-# 2. Tag and push
-git tag -a v0.3.0 -m "Release 0.3.0"
-git push origin v0.3.0
+# 2. Tag and push (use the version you just set)
+git tag -a v0.5.0 -m "Release 0.5.0"
+git push origin v0.5.0
 # 3. CI builds the multi-arch image, pushes to GHCR, and creates a GitHub Release
 ```
 
@@ -141,9 +141,16 @@ Incremental behavior (`index --incremental`):
 
 - `query`: Query emails using metadata filters only
 
+- `index-file <path>`: Index a single `.eml` file end-to-end (parse, dedup-check, embed, write). Designed for MailMate rules that fire on new mail — `mail-semantic-search index-file "$MM_PATH"` indexes the message immediately instead of waiting for the next scheduled incremental scan.
+  - `--force`: Re-embed and re-upsert even if the stored mtime matches
+
 - `inspect --file-path "/full/path/to/email.eml"`: Show the indexed SQLite metadata and exact Chroma document for one email
 
 - `status`: Show indexing status and statistics
+
+- `dedup`: Remove duplicate index entries that share the same `Message-ID`, keeping the most recently indexed copy. Run `--dry-run` first to preview.
+
+- `migrate-paths --old-prefix X --new-prefix Y`: Rewrite indexed `file_path` values from one prefix to another in both SQLite and Chroma. Reuses existing embeddings (no re-embed cost). Idempotent. Used when changing the host/container path layout — see [Upgrading](#upgrading-from-04x-or-earlier).
 
 ## MCP Server
 
@@ -225,7 +232,21 @@ Notes:
 
 The MCP server and CLI search only what has been indexed. Running `index --incremental` regularly keeps results current as new mail arrives. Once a day is the minimum; every few hours is better.
 
-**Command to schedule** (replace `yourusername` with your home directory):
+There are two ways to run it. Both produce identical file_path values in the index (the container mounts the maildir at the same path it has on the host), so you can mix and match freely.
+
+### Native venv (recommended for scheduled runs)
+
+Faster: ~10–30 seconds per incremental run instead of ~2 minutes, because `find` walks the maildir directly on the host filesystem instead of through Docker's macOS filesystem shim.
+
+```bash
+cd /Users/yourusername/Development/mail-semantic-search && .venv/bin/mail-semantic-search index --incremental
+```
+
+Requires that you've created a local venv (`python3 -m venv .venv && .venv/bin/pip install -e .`) — the same one used by the MCP server in Option A below.
+
+### Docker
+
+Slower but no Python toolchain needed locally. Use this if you only have Docker.
 
 ```bash
 cd /Users/yourusername/Development/mail-semantic-search && /opt/homebrew/bin/docker compose run --rm mail-semantic-search index --incremental
@@ -298,6 +319,32 @@ For users who already have [Keyboard Maestro](https://www.keyboardmaestro.com/):
 4. Optionally pipe output to a log file by appending `>> /tmp/mail-semantic-search-index.log 2>&1`.
 
 No PATH issues since the full docker path is explicit.
+
+## Upgrading from 0.4.x or earlier
+
+Releases before `v0.5.0` bind-mounted the maildir into the container at a hardcoded `/emails` path, so `file_path` values in the index were `/emails/...` — usable only inside Docker. `v0.5.0` switched to mounting `${EMAIL_DIR}` at the same path it has on the host so Docker and native venv runs produce identical paths.
+
+If you indexed under an older version, your stored `file_path` values still start with `/emails/`. Run the one-shot migration command to rewrite them in both SQLite and Chroma (it reuses your existing embeddings, so there's no re-embed cost):
+
+```bash
+# 1. Back up first (APFS clone is near-instant on the same volume):
+cp -c -R /path/to/data /path/to/data.backup
+
+# 2. Preview the rewrite:
+.venv/bin/mail-semantic-search migrate-paths \
+  --old-prefix "/emails/" \
+  --new-prefix "$EMAIL_DIR/" \
+  --dry-run
+
+# 3. Apply it (~10 min natively, ~30 min in Docker for ~437k rows):
+.venv/bin/mail-semantic-search migrate-paths \
+  --old-prefix "/emails/" \
+  --new-prefix "$EMAIL_DIR/"
+```
+
+The command is idempotent — if interrupted, rerun it and it skips rows whose new IDs are already in Chroma.
+
+After migration, pull the new `docker-compose.yml`. Both `docker compose run --rm mail-semantic-search index --incremental` and `.venv/bin/mail-semantic-search index --incremental` should report `skipped=<most-of-them>` instead of re-parsing every candidate.
 
 ## Storage Requirements
 
