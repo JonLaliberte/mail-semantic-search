@@ -4,11 +4,15 @@ services:
     build: .
     container_name: mail-semantic-search
     volumes:
-      - ${EMAIL_DIR}:/emails:ro
+      # Mount EMAIL_DIR at the same path inside the container as on the
+      # host. This keeps file_path values identical between Docker runs
+      # and native runs — no path translation layer needed.
+      - ${EMAIL_DIR}:${EMAIL_DIR}:ro
       - ${DATA_VOLUME_PATH:-./data}:/app/data
     environment:
       - EMBEDDING_MODEL=${EMBEDDING_MODEL:-BGE-base-en-v1.5}
-      - EMAIL_DIR=/emails
+      # EMAIL_DIR is inherited from .env via env_file, matching the host
+      # path so file_path values stay consistent across runtimes.
       - CHROMADB_PATH=/app/data/chromadb
       - MODEL_CACHE_DIR=/app/data/models
       - DATABASE_PATH=/app/data/database.db

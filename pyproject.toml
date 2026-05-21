@@ -1,6 +1,6 @@
 [project]
 name = "mail-semantic-search"
-version = "0.4.2"
+version = "0.5.0"
 description = "Local semantic search for email files using embeddings and vector search"
 requires-python = ">=3.10"
 dependencies = [

@@ -4,11 +4,11 @@ import logging
 import sqlite3
 import sys
 from datetime import datetime
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 import click
 
-from mail_semantic_search.database import Database
+from mail_semantic_search.database import Database, get_file_hash
 from mail_semantic_search.index import index_email_file, index_emails
 from mail_semantic_search.vector_store import VectorStore
 from mail_semantic_search.runtime_logging import (
@@ -357,6 +357,149 @@ def dedup(dry_run: bool):
         handle_error(f"Database error: {e}", log_exception=True)
     except (OSError, RuntimeError, ValueError, TypeError) as e:
         handle_error(f"Dedup failed: {e}", log_exception=True)
+
+
+@main.command("migrate-paths")
+@click.option("--old-prefix", required=True, help="Path prefix to rewrite (e.g. /emails/)")
+@click.option("--new-prefix", required=True, help="Replacement prefix (e.g. /Volumes/External Storage SSD/MailMate/Messages/)")
+@click.option("--batch-size", type=int, default=500, help="Rows per Chroma batch")
+@click.option("--dry-run", is_flag=True, help="Show what would change without writing")
+def migrate_paths(old_prefix: str, new_prefix: str, batch_size: int, dry_run: bool):
+    """Rewrite indexed file_path values from one prefix to another.
+
+    Migrates both SQLite (emails.file_path, emails.file_hash) and ChromaDB
+    (document IDs are md5(file_path), and metadata['file_path']). Reuses
+    existing embeddings — no re-embed cost.
+
+    Idempotent: rows whose new-id already exists in Chroma are skipped, so
+    interrupted runs can be re-run safely.
+    """
+    if not old_prefix.endswith("/"):
+        old_prefix = old_prefix + "/"
+    if not new_prefix.endswith("/"):
+        new_prefix = new_prefix + "/"
+
+    try:
+        with Database() as database, VectorStore() as vector_store:
+            cursor = database.conn.cursor()
+            cursor.execute(
+                "SELECT id, file_path FROM emails WHERE file_path LIKE ? ORDER BY id",
+                (f"{old_prefix}%",),
+            )
+            rows = cursor.fetchall()
+            total = len(rows)
+            click.echo(f"Found {total} rows with prefix {old_prefix!r}")
+            if total == 0:
+                click.echo("Nothing to migrate.")
+                return
+
+            if dry_run:
+                click.echo("Sample migrations (first 3):")
+                for r in rows[:3]:
+                    old = r["file_path"]
+                    new = new_prefix + old[len(old_prefix):]
+                    click.echo(f"  {old}")
+                    click.echo(f"   → {new}")
+                return
+
+            collection = vector_store.collection
+            migrated = 0
+            already_migrated = 0
+            orphan_in_chroma = 0
+            sqlite_updates: List[Tuple[str, str, int]] = []
+
+            for batch_start in range(0, total, batch_size):
+                batch = rows[batch_start : batch_start + batch_size]
+                old_paths = [r["file_path"] for r in batch]
+                new_paths = [new_prefix + p[len(old_prefix):] for p in old_paths]
+                old_ids = [get_file_hash(p) for p in old_paths]
+                new_ids = [get_file_hash(p) for p in new_paths]
+
+                # Idempotency: which new_ids already exist in Chroma?
+                existing_new = collection.get(ids=new_ids, include=[])
+                already_set = set(existing_new.get("ids") or [])
+
+                # Build the to-migrate list
+                pending_indices = [
+                    i for i in range(len(batch))
+                    if new_ids[i] not in already_set
+                ]
+                already_migrated += len(batch) - len(pending_indices)
+
+                if pending_indices:
+                    pending_old_ids = [old_ids[i] for i in pending_indices]
+                    existing_old = collection.get(
+                        ids=pending_old_ids,
+                        include=["embeddings", "metadatas", "documents"],
+                    )
+                    old_by_id = {
+                        existing_old["ids"][k]: k
+                        for k in range(len(existing_old.get("ids") or []))
+                    }
+
+                    upsert_ids: List[str] = []
+                    upsert_embeddings = []
+                    upsert_metadatas = []
+                    upsert_documents = []
+                    delete_ids: List[str] = []
+
+                    for i in pending_indices:
+                        if old_ids[i] not in old_by_id:
+                            orphan_in_chroma += 1
+                            # Still need to update SQLite for consistency
+                            sqlite_updates.append((new_paths[i], new_ids[i], batch[i]["id"]))
+                            continue
+                        k = old_by_id[old_ids[i]]
+                        meta = dict(existing_old["metadatas"][k] or {})
+                        meta["file_path"] = new_paths[i]
+                        upsert_ids.append(new_ids[i])
+                        upsert_embeddings.append(existing_old["embeddings"][k])
+                        upsert_metadatas.append(meta)
+                        upsert_documents.append(existing_old["documents"][k])
+                        delete_ids.append(old_ids[i])
+                        sqlite_updates.append((new_paths[i], new_ids[i], batch[i]["id"]))
+
+                    if upsert_ids:
+                        collection.upsert(
+                            ids=upsert_ids,
+                            embeddings=upsert_embeddings,
+                            metadatas=upsert_metadatas,
+                            documents=upsert_documents,
+                        )
+                        collection.delete(ids=delete_ids)
+                        migrated += len(upsert_ids)
+
+                # Rows already-migrated in Chroma still need SQLite update if
+                # we got interrupted between Chroma+SQLite updates last time
+                for i in range(len(batch)):
+                    if new_ids[i] in already_set:
+                        sqlite_updates.append((new_paths[i], new_ids[i], batch[i]["id"]))
+
+                if (batch_start // batch_size) % 5 == 0:
+                    click.echo(
+                        f"  Progress: {batch_start + len(batch)}/{total} "
+                        f"(chroma migrated={migrated}, already={already_migrated}, "
+                        f"orphan={orphan_in_chroma})"
+                    )
+
+            # Bulk SQLite update — single transaction
+            click.echo(f"Updating SQLite for {len(sqlite_updates)} rows...")
+            cursor.executemany(
+                "UPDATE emails SET file_path = ?, file_hash = ? WHERE id = ?",
+                sqlite_updates,
+            )
+            database.conn.commit()
+
+            click.echo(
+                f"Done. Chroma migrated={migrated}, "
+                f"already-migrated={already_migrated}, "
+                f"orphans={orphan_in_chroma}, "
+                f"SQLite rows updated={len(sqlite_updates)}."
+            )
+    except sqlite3.Error as e:
+        handle_error(f"Database error: {e}", log_exception=True)
+    except (OSError, RuntimeError, ValueError, TypeError) as e:
+        handle_error(f"Migration failed: {e}", log_exception=True)
 
 
 if __name__ == "__main__":
