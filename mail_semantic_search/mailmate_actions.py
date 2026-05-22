@@ -1,25 +1,47 @@
-"""macOS-only AppleScript actions against MailMate.
+"""macOS-only actions against MailMate.
 
-These tools drive the running MailMate app via `osascript`. The MCP server
-gates them behind a `platform.system() == "Darwin"` check at registration
-time, so this module is only imported when AppleScript is actually usable.
+Opens use the macOS `open` command (LaunchServices) — fast, fire-and-forget,
+no AppleEvent round-trip. The previous AppleScript `open location` approach
+hung for the full 120s AppleScript timeout because the tell-block waited for
+MailMate to ack the URL dispatch, which it doesn't reliably do while it's
+busy actually loading the message.
 
-Selectors used here come straight from MailMate's bundled keybinding plists
+`perform` actions run as a separate osascript call AFTER a brief delay so
+MailMate has time to bring the message into focus. The AppleScript itself
+uses `with timeout of N seconds` so even if MailMate is slow we fail fast
+rather than waiting 120s.
+
+Selectors come from MailMate's bundled keybinding plists
 (`/Applications/MailMate.app/Contents/Resources/KeyBindings/{Gmail,Standard}.plist`):
 
   * Mark read   →  setTag: \\Seen          (the IMAP \\Seen flag)
   * Mark unread →  removeTag: \\Seen
   * Archive     →  archive:                (no argument)
 
-`perform` accepts a flat list of alternating selectors and arguments, so
-multi-step actions ride a single round-trip into MailMate.
+`perform` accepts a flat list of alternating selectors and arguments.
 """
 
 from __future__ import annotations
 
 import subprocess
+import time
 from typing import Dict, List
 from urllib.parse import quote
+
+
+# How long to wait after dispatching the open URL before sending perform.
+# MailMate needs to load the message and bring it to focus; perform runs
+# against the current first responder.
+_OPEN_TO_PERFORM_DELAY_SECONDS = 0.6
+
+# AppleScript-level timeout on the perform call. If MailMate is wedged we
+# return quickly with a clear status instead of waiting the AppleScript
+# default of 120s.
+_PERFORM_APPLESCRIPT_TIMEOUT_SECONDS = 8
+
+# subprocess.run timeout — must be larger than the AppleScript-level timeout
+# above so AppleScript can finish its own error path before we kill osascript.
+_OSASCRIPT_SUBPROCESS_TIMEOUT_SECONDS = 15
 
 
 def _normalize_message_id(message_id: str) -> str:
@@ -28,23 +50,51 @@ def _normalize_message_id(message_id: str) -> str:
     if cleaned.startswith("<") and cleaned.endswith(">"):
         cleaned = cleaned[1:-1]
     # Don't encode '@' — it's valid in message-id URLs and MailMate expects it bare.
-    return quote(cleaned, safe="@.-_+")
+    return quote(cleaned, safe="@.-_+/")
+
+
+def _dispatch_open(url: str) -> Dict[str, object]:
+    """Dispatch a URL via macOS `open` (LaunchServices). Returns instantly."""
+    try:
+        result = subprocess.run(
+            ["open", url],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except subprocess.TimeoutExpired:
+        return {"status": "timeout", "stdout": "", "stderr": "open timed out after 5s"}
+    except FileNotFoundError:
+        return {
+            "status": "failed",
+            "stdout": "",
+            "stderr": "`open` not found — these tools require macOS",
+        }
+
+    if result.returncode != 0:
+        return {
+            "status": "failed",
+            "stdout": result.stdout.strip(),
+            "stderr": result.stderr.strip() or f"open exited {result.returncode}",
+        }
+    return {"status": "ok", "stdout": "", "stderr": ""}
 
 
 def _run_osascript(script: str) -> Dict[str, object]:
-    """Run an AppleScript and return {status, stdout, stderr}.
-
-    Times out at 15s to keep a misbehaving MailMate from hanging the MCP.
-    """
+    """Run an AppleScript and return {status, stdout, stderr}."""
     try:
         result = subprocess.run(
             ["osascript", "-e", script],
             capture_output=True,
             text=True,
-            timeout=15,
+            timeout=_OSASCRIPT_SUBPROCESS_TIMEOUT_SECONDS,
         )
     except subprocess.TimeoutExpired:
-        return {"status": "timeout", "stdout": "", "stderr": "osascript timed out after 15s"}
+        return {
+            "status": "timeout",
+            "stdout": "",
+            "stderr": f"osascript timed out after {_OSASCRIPT_SUBPROCESS_TIMEOUT_SECONDS}s",
+        }
     except FileNotFoundError:
         return {
             "status": "failed",
@@ -58,42 +108,57 @@ def _run_osascript(script: str) -> Dict[str, object]:
             "stdout": result.stdout.strip(),
             "stderr": result.stderr.strip(),
         }
-    return {"status": "ok", "stdout": result.stdout.strip(), "stderr": result.stderr.strip()}
+    return {"status": "ok", "stdout": result.stdout.strip(), "stderr": ""}
+
+
+def _build_selector_list(selectors: List[str]) -> str:
+    """Build an AppleScript list literal: {"setTag:", "\\Seen", "archive:"}."""
+    parts = []
+    for sel in selectors:
+        # Escape backslashes and quotes for AppleScript string literal.
+        escaped = sel.replace("\\", "\\\\").replace('"', '\\"')
+        parts.append(f'"{escaped}"')
+    return "{" + ", ".join(parts) + "}"
 
 
 def _perform_on_message(message_id: str, selectors: List[str]) -> Dict[str, object]:
-    """Open a message in MailMate and invoke a chain of selectors against it.
+    """Open the message and invoke a chain of selectors against it.
 
-    The `open location` call selects the message in MailMate's UI; perform
-    then operates on the current selection. The two run inside the same
-    `tell` block so MailMate doesn't drop focus between them.
+    Two-step dispatch:
+      1. macOS `open message://...` — instant, brings up the message in
+         MailMate without blocking on an AppleEvent ack.
+      2. Brief delay, then a separate osascript that activates MailMate
+         and calls `perform`. AppleScript timeout caps the wait.
     """
     normalized = _normalize_message_id(message_id)
-    # Build AppleScript list literal: {"setTag:", "\\Seen", "archive:"}
-    # AppleScript strings are double-quoted; backslashes inside need escaping.
-    parts = []
-    for sel in selectors:
-        # Escape any embedded quotes/backslashes for AppleScript string literal.
-        escaped = sel.replace("\\", "\\\\").replace('"', '\\"')
-        parts.append(f'"{escaped}"')
-    selector_list = "{" + ", ".join(parts) + "}"
 
+    open_result = _dispatch_open(f"message:{normalized}")
+    if open_result["status"] != "ok":
+        open_result["message_id"] = message_id
+        open_result["step"] = "open"
+        return open_result
+
+    time.sleep(_OPEN_TO_PERFORM_DELAY_SECONDS)
+
+    selector_list = _build_selector_list(selectors)
     script = (
-        f'tell application "MailMate"\n'
-        f'    open location "message://{normalized}"\n'
-        f'    perform {selector_list}\n'
-        f'end tell'
+        f'with timeout of {_PERFORM_APPLESCRIPT_TIMEOUT_SECONDS} seconds\n'
+        f'    tell application "MailMate"\n'
+        f'        activate\n'
+        f'        perform {selector_list}\n'
+        f'    end tell\n'
+        f'end timeout'
     )
     result = _run_osascript(script)
     result["message_id"] = message_id
+    result["step"] = "perform"
     return result
 
 
 def open_email(message_id: str) -> Dict[str, object]:
     """Open the given message in MailMate (foregrounds the app)."""
     normalized = _normalize_message_id(message_id)
-    script = f'tell application "MailMate" to open location "message://{normalized}"'
-    result = _run_osascript(script)
+    result = _dispatch_open(f"message:{normalized}")
     result["message_id"] = message_id
     return result
 
@@ -109,5 +174,5 @@ def archive_email(message_id: str) -> Dict[str, object]:
 
 
 def mark_read_and_archive(message_id: str) -> Dict[str, object]:
-    """Mark as read AND archive in one round-trip to MailMate."""
+    """Mark as read AND archive in one MailMate trip — natural triage finisher."""
     return _perform_on_message(message_id, ["setTag:", "\\Seen", "archive:"])
