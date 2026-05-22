@@ -53,11 +53,20 @@ def _normalize_message_id(message_id: str) -> str:
     return quote(cleaned, safe="@.-_+/")
 
 
-def _dispatch_open(url: str) -> Dict[str, object]:
-    """Dispatch a URL via macOS `open` (LaunchServices). Returns instantly."""
+def _dispatch_open(url: str, background: bool = False) -> Dict[str, object]:
+    """Dispatch a URL via macOS `open` (LaunchServices). Returns instantly.
+
+    background=True passes `-g`, which tells LaunchServices not to bring the
+    receiving app to the foreground. Use this for action tools (mark read,
+    archive) where the user just wants the side effect, not a window pop-up.
+    """
+    cmd = ["open"]
+    if background:
+        cmd.append("-g")
+    cmd.append(url)
     try:
         result = subprocess.run(
-            ["open", url],
+            cmd,
             capture_output=True,
             text=True,
             timeout=5,
@@ -122,17 +131,20 @@ def _build_selector_list(selectors: List[str]) -> str:
 
 
 def _perform_on_message(message_id: str, selectors: List[str]) -> Dict[str, object]:
-    """Open the message and invoke a chain of selectors against it.
+    """Bring the message into focus and invoke a chain of selectors against it.
 
-    Two-step dispatch:
-      1. macOS `open message://...` — instant, brings up the message in
-         MailMate without blocking on an AppleEvent ack.
-      2. Brief delay, then a separate osascript that activates MailMate
-         and calls `perform`. AppleScript timeout caps the wait.
+    Two-step dispatch, both intentionally backgrounded:
+      1. macOS `open -g message://...` — dispatches the URL via
+         LaunchServices but does NOT foreground MailMate. MailMate still
+         processes the URL (and a viewer window may open), but the user's
+         current app stays focused.
+      2. Brief delay, then a separate osascript that calls `perform`
+         (without `activate`, again to avoid foregrounding). AppleScript
+         timeout caps the wait.
     """
     normalized = _normalize_message_id(message_id)
 
-    open_result = _dispatch_open(f"message:{normalized}")
+    open_result = _dispatch_open(f"message:{normalized}", background=True)
     if open_result["status"] != "ok":
         open_result["message_id"] = message_id
         open_result["step"] = "open"
@@ -144,7 +156,6 @@ def _perform_on_message(message_id: str, selectors: List[str]) -> Dict[str, obje
     script = (
         f'with timeout of {_PERFORM_APPLESCRIPT_TIMEOUT_SECONDS} seconds\n'
         f'    tell application "MailMate"\n'
-        f'        activate\n'
         f'        perform {selector_list}\n'
         f'    end tell\n'
         f'end timeout'
@@ -156,9 +167,9 @@ def _perform_on_message(message_id: str, selectors: List[str]) -> Dict[str, obje
 
 
 def open_email(message_id: str) -> Dict[str, object]:
-    """Open the given message in MailMate (foregrounds the app)."""
+    """Open the given message in MailMate (foregrounds the app — the user asked to see it)."""
     normalized = _normalize_message_id(message_id)
-    result = _dispatch_open(f"message:{normalized}")
+    result = _dispatch_open(f"message:{normalized}", background=False)
     result["message_id"] = message_id
     return result
 
