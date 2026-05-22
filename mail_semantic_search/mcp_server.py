@@ -1,6 +1,7 @@
 """FastMCP server exposing mail-semantic-search tools."""
 
 import logging
+import platform
 import sys
 from datetime import datetime
 from typing import Optional
@@ -138,6 +139,37 @@ def list_inbox_emails(
             date_before=_parse_mcp_date(date_before),
         )
     )
+
+
+# macOS-only MailMate actions. Registered only when running on Darwin so the
+# rest of the server still works on Linux (Docker images, etc.).
+if platform.system() == "Darwin":
+    from mail_semantic_search.mailmate_actions import (
+        archive_email as _archive_email,
+        mark_email_read as _mark_email_read,
+        mark_read_and_archive as _mark_read_and_archive,
+        open_email as _open_email,
+    )
+
+    @mcp.tool
+    def open_email(message_id: str) -> dict:
+        """Open the given email in MailMate. Accepts the RFC-822 Message-ID with or without angle brackets."""
+        return _open_email(message_id)
+
+    @mcp.tool
+    def mark_email_read(message_id: str) -> dict:
+        """Mark the given email as read in MailMate (sets the IMAP \\Seen flag)."""
+        return _mark_email_read(message_id)
+
+    @mcp.tool
+    def archive_email(message_id: str) -> dict:
+        """Archive the given email in MailMate (invokes MailMate's archive: action)."""
+        return _archive_email(message_id)
+
+    @mcp.tool
+    def mark_read_and_archive(message_id: str) -> dict:
+        """Mark as read AND archive in a single MailMate round-trip — use when finishing triage of one email."""
+        return _mark_read_and_archive(message_id)
 
 
 def main() -> None:
