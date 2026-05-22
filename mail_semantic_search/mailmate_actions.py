@@ -24,7 +24,6 @@ Selectors come from MailMate's bundled keybinding plists
 from __future__ import annotations
 
 import subprocess
-import time
 from typing import Dict, List
 from urllib.parse import quote
 
@@ -131,38 +130,55 @@ def _build_selector_list(selectors: List[str]) -> str:
 
 
 def _perform_on_message(message_id: str, selectors: List[str]) -> Dict[str, object]:
-    """Bring the message into focus and invoke a chain of selectors against it.
+    """Bring the message into focus, invoke selectors, then close any window we opened.
 
-    Two-step dispatch, both intentionally backgrounded:
-      1. macOS `open -g message://...` — dispatches the URL via
-         LaunchServices but does NOT foreground MailMate. MailMate still
-         processes the URL (and a viewer window may open), but the user's
-         current app stays focused.
-      2. Brief delay, then a separate osascript that calls `perform`
-         (without `activate`, again to avoid foregrounding). AppleScript
-         timeout caps the wait.
+    MailMate doesn't expose a "act on message-id" API — every public surface
+    (AppleScript, bundles, URL handlers) routes through "make the message the
+    current selection." The only way to make a specific message the selection
+    without changing the user's mailbox view is to dispatch its `message:` URL,
+    which side-effect-opens a viewer window.
+
+    To make the side effect invisible:
+
+      1. Snapshot existing window IDs (before any open).
+      2. Dispatch `open -g message:<id>` via LaunchServices — backgrounded,
+         so MailMate doesn't steal focus from the user's current app.
+      3. Wait briefly for MailMate to load the message and make it the
+         first responder.
+      4. Run `perform {...}` to apply the actions.
+      5. Close any windows whose ID was NOT in the snapshot — those are
+         the viewers we caused to open. Some actions (archive, delete)
+         already close the viewer themselves, so this loop typically
+         finds nothing to close in those cases; that's fine.
+
+    All five steps fit in a single osascript call by using `do shell script
+    "open -g ..."` from inside AppleScript — avoids the AppleEvent hang
+    that `tell app "MailMate" to open location` triggers.
     """
     normalized = _normalize_message_id(message_id)
-
-    open_result = _dispatch_open(f"message:{normalized}", background=True)
-    if open_result["status"] != "ok":
-        open_result["message_id"] = message_id
-        open_result["step"] = "open"
-        return open_result
-
-    time.sleep(_OPEN_TO_PERFORM_DELAY_SECONDS)
-
     selector_list = _build_selector_list(selectors)
+    # Quote the URL for shell. Single-quote everything; embedded single
+    # quotes in the message-id are rare but encoded by _normalize_message_id.
+    url_for_shell = f"message:{normalized}".replace("'", "'\\''")
+
     script = (
         f'with timeout of {_PERFORM_APPLESCRIPT_TIMEOUT_SECONDS} seconds\n'
+        f'    set preIds to {{}}\n'
+        f'    tell application "MailMate"\n'
+        f'        set preIds to id of every window\n'
+        f'    end tell\n'
+        f"    do shell script \"open -g '{url_for_shell}'\"\n"
+        f'    delay {_OPEN_TO_PERFORM_DELAY_SECONDS}\n'
         f'    tell application "MailMate"\n'
         f'        perform {selector_list}\n'
+        f'        repeat with w in (every window)\n'
+        f'            if (id of w) is not in preIds then close w\n'
+        f'        end repeat\n'
         f'    end tell\n'
         f'end timeout'
     )
     result = _run_osascript(script)
     result["message_id"] = message_id
-    result["step"] = "perform"
     return result
 
 
