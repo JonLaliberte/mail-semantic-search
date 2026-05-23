@@ -161,6 +161,13 @@ def _perform_on_message(message_id: str, selectors: List[str]) -> Dict[str, obje
     # quotes in the message-id are rare but encoded by _normalize_message_id.
     url_for_shell = f"message:{normalized}".replace("'", "'\\''")
 
+    # Cleanup uses a two-pass pattern: first build a list of post-perform
+    # window IDs that weren't in preIds, then close each one by looking it
+    # up by id. Iterating `every window` while closing inside the loop
+    # shifts the collection's indices and AppleScript raises "Can't get
+    # item N of every window. Invalid index." once the iterator outruns
+    # the shrinking list. The `whose id is X` lookup is stable across
+    # closes because each close call resolves the specifier fresh.
     script = (
         f'with timeout of {_PERFORM_APPLESCRIPT_TIMEOUT_SECONDS} seconds\n'
         f'    set preIds to {{}}\n'
@@ -169,10 +176,17 @@ def _perform_on_message(message_id: str, selectors: List[str]) -> Dict[str, obje
         f'    end tell\n'
         f"    do shell script \"open -g '{url_for_shell}'\"\n"
         f'    delay {_OPEN_TO_PERFORM_DELAY_SECONDS}\n'
+        f'    set toClose to {{}}\n'
         f'    tell application "MailMate"\n'
         f'        perform {selector_list}\n'
         f'        repeat with w in (every window)\n'
-        f'            if (id of w) is not in preIds then close w\n'
+        f'            set wid to id of w\n'
+        f'            if wid is not in preIds then set end of toClose to wid\n'
+        f'        end repeat\n'
+        f'        repeat with wid in toClose\n'
+        f'            try\n'
+        f'                close (first window whose id is wid)\n'
+        f'            end try\n'
         f'        end repeat\n'
         f'    end tell\n'
         f'end timeout'
