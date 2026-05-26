@@ -1,7 +1,9 @@
 """SQLite database for email metadata storage."""
 
 import hashlib
+import json
 import logging
+import os
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -77,6 +79,7 @@ class Database:
         
         self._create_schema()
         self._migrate_message_id_uniqueness()
+        self._migrate_add_extraction_columns()
 
     def _create_schema(self) -> None:
         """Create database schema if it doesn't exist."""
@@ -225,6 +228,45 @@ class Database:
 
         # Recreate non-unique indexes that are dropped with table rebuild.
         self._create_schema()
+
+    def _migrate_add_extraction_columns(self) -> None:
+        """Add extraction_version, in_reply_to, references_header columns if missing.
+
+        Uses the check-PRAGMA-then-ADD pattern that other migrations in this
+        file follow. All existing rows default to extraction_version=0 which
+        the reextract command treats as stale.
+        """
+        cursor = self.conn.cursor()
+        cursor.execute("PRAGMA table_info(emails)")
+        existing_cols = {row["name"] for row in cursor.fetchall()}
+
+        migrations = [
+            (
+                "extraction_version",
+                "ALTER TABLE emails ADD COLUMN extraction_version INTEGER NOT NULL DEFAULT 0",
+            ),
+            (
+                "in_reply_to",
+                "ALTER TABLE emails ADD COLUMN in_reply_to TEXT",
+            ),
+            (
+                "references_header",
+                "ALTER TABLE emails ADD COLUMN references_header TEXT",
+            ),
+        ]
+
+        added_any = False
+        for col_name, ddl in migrations:
+            if col_name not in existing_cols:
+                cursor.execute(ddl)
+                added_any = True
+
+        if added_any:
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_emails_extraction_version "
+                "ON emails(extraction_version)"
+            )
+            self.conn.commit()
 
     def _has_unique_index_on_column(self, table_name: str, column_name: str) -> bool:
         """Return True if table has a unique index exactly on column_name."""
@@ -413,6 +455,9 @@ class Database:
         # Issue #9: Use config.body_preview_limit for consistent truncation
         body_preview = email_data.get("body", "")[:config.body_preview_limit] if email_data.get("body") else ""
 
+        # Import here to avoid a circular import (mailmate_reader imports database).
+        from mail_semantic_search.mailmate_reader import CURRENT_EXTRACTION_VERSION
+
         try:
             # Issue #16: Explicit transaction for atomic operations
             # Issue #1 & #8: Use upsert pattern (ON CONFLICT) to preserve ID and handle cascades properly
@@ -421,8 +466,9 @@ class Database:
                 INSERT INTO emails (
                     message_id, file_path, file_hash, subject, from_addr,
                     to_addrs, cc_addrs, bcc_addrs, date, body_preview,
-                    has_attachments, attachment_count, file_size, file_mtime, indexed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    has_attachments, attachment_count, file_size, file_mtime, indexed_at,
+                    extraction_version, in_reply_to, references_header
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(file_path) DO UPDATE SET
                     message_id = excluded.message_id,
                     file_hash = excluded.file_hash,
@@ -437,7 +483,10 @@ class Database:
                     attachment_count = excluded.attachment_count,
                     file_size = excluded.file_size,
                     file_mtime = excluded.file_mtime,
-                    indexed_at = excluded.indexed_at
+                    indexed_at = excluded.indexed_at,
+                    extraction_version = excluded.extraction_version,
+                    in_reply_to = excluded.in_reply_to,
+                    references_header = excluded.references_header
                 """,
                 (
                     email_data.get("message_id") or None,
@@ -455,17 +504,24 @@ class Database:
                     file_size,
                     file_mtime,
                     datetime.now(),
+                    CURRENT_EXTRACTION_VERSION,
+                    email_data.get("in_reply_to") or None,
+                    email_data.get("references") or None,
                 ),
             )
 
-            # Get the email_id (works for both insert and update)
-            if cursor.lastrowid:
-                email_id = cursor.lastrowid
-            else:
-                # If lastrowid is 0, the row was updated - fetch the existing ID
-                cursor.execute("SELECT id FROM emails WHERE file_path = ?", (email_data["file_path"],))
-                row = cursor.fetchone()
-                email_id = row["id"] if row else cursor.lastrowid
+            # Always fetch the canonical id by file_path. cursor.lastrowid is
+            # unreliable for ON CONFLICT DO UPDATE in SQLite — it returns the
+            # next-would-be autoincrement value, not the existing row's id,
+            # which silently corrupted attachment FK references in the reextract
+            # path (every reextracted row hit UPDATE, then the attachment INSERT
+            # used a bogus email_id and tripped the FK constraint).
+            cursor.execute(
+                "SELECT id FROM emails WHERE file_path = ?",
+                (email_data["file_path"],),
+            )
+            row = cursor.fetchone()
+            email_id = row["id"]
 
             # Delete existing attachments for this email (will cascade properly now with FK enabled)
             cursor.execute("DELETE FROM attachments WHERE email_id = ?", (email_id,))
@@ -703,6 +759,89 @@ class Database:
             ("incremental_scan_watermark", watermark.isoformat()),
         )
         self.conn.commit()
+
+    _BACKFILL_LOCK_KEY = "backfill_in_progress"
+
+    def get_backfill_lock(self) -> Optional[Dict]:
+        """Return the live backfill lock as {pid, started_at}, or None.
+
+        A lock held by a dead PID is treated as absent (and cleared on next
+        acquire_backfill_lock call). Returns the raw stored value when the
+        PID is still alive.
+        """
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT value FROM app_state WHERE key = ?",
+            (self._BACKFILL_LOCK_KEY,),
+        )
+        row = cursor.fetchone()
+        if row is None or not row["value"]:
+            return None
+        try:
+            payload = json.loads(row["value"])
+        except (ValueError, TypeError):
+            return None
+
+        pid = payload.get("pid")
+        if not isinstance(pid, int):
+            return None
+        if not self._pid_is_alive(pid):
+            return None
+        return payload
+
+    def acquire_backfill_lock(self) -> None:
+        """Claim the backfill lock for the current process.
+
+        Raises RuntimeError if a live PID currently holds the lock.
+        """
+        existing = self.get_backfill_lock()
+        if existing is not None and existing.get("pid") != os.getpid():
+            raise RuntimeError(
+                f"Backfill lock already held by pid={existing['pid']} "
+                f"(started {existing.get('started_at')})"
+            )
+
+        payload = json.dumps(
+            {
+                "pid": os.getpid(),
+                "started_at": datetime.now().isoformat(),
+            }
+        )
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO app_state (key, value, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (self._BACKFILL_LOCK_KEY, payload),
+        )
+        self.conn.commit()
+
+    def release_backfill_lock(self) -> None:
+        """Release the backfill lock unconditionally."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "DELETE FROM app_state WHERE key = ?",
+            (self._BACKFILL_LOCK_KEY,),
+        )
+        self.conn.commit()
+
+    @staticmethod
+    def _pid_is_alive(pid: int) -> bool:
+        """Best-effort liveness check; signal 0 raises if PID is gone."""
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            # PID exists but is owned by another user — treat as alive.
+            return True
+        except OSError:
+            return False
+        return True
 
     def close(self) -> None:
         """Close database connection."""

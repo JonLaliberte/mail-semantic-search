@@ -14,7 +14,7 @@ class Config:
     """Application configuration loaded from environment variables."""
 
     # Default limits for text processing
-    DEFAULT_BODY_PREVIEW_LIMIT = 2000
+    DEFAULT_BODY_PREVIEW_LIMIT = 5000
     DEFAULT_MAX_ATTACHMENT_TEXT_PER_FILE = 2000
     DEFAULT_MAX_TOTAL_ATTACHMENT_TEXT = 5000
     DEFAULT_MAX_FILTERED_SEARCH_LIMIT = 1000
@@ -70,6 +70,16 @@ class Config:
         # Database path
         database_path = os.getenv("DATABASE_PATH", "./data/database.db")
         self.database_path = Path(database_path)
+
+        # Staging dir for emails+attachments copied out for LLM access. Defaults
+        # under ~/Documents so Claude Desktop's filesystem sandbox can read them
+        # — the source EMAIL_DIR is often on an external volume that the LLM
+        # context cannot access.
+        staging_dir = os.getenv(
+            "STAGING_DIR",
+            os.path.expanduser("~/Documents/mailmate-staged"),
+        )
+        self.staging_dir = Path(staging_dir)
 
         # Runtime logging
         log_path = os.getenv("LOG_PATH", "./data/logs/mail-semantic-search.error.log")

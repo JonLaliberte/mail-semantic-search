@@ -359,6 +359,124 @@ def dedup(dry_run: bool):
         handle_error(f"Dedup failed: {e}", log_exception=True)
 
 
+@main.command()
+@click.option(
+    "--file-path",
+    help="Reextract one email by its exact file path",
+)
+@click.option(
+    "--message-id",
+    help="Reextract one email by Message-ID",
+)
+@click.option(
+    "--limit",
+    type=int,
+    help="Bulk mode: cap the number of stale rows processed",
+)
+@click.option(
+    "--batch-size",
+    type=int,
+    default=64,
+    help="Bulk mode: rows per embed/upsert batch (default: 64)",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Bulk mode: count stale rows without writing",
+)
+def reextract(
+    file_path: Optional[str],
+    message_id: Optional[str],
+    limit: Optional[int],
+    batch_size: int,
+    dry_run: bool,
+):
+    """Re-parse and re-embed indexed emails using the current extractor.
+
+    Two modes:
+
+      Single-email (visual QA): pass --file-path or --message-id. Prints a
+      before/after body_preview diff so you can verify the new extractor on
+      one row before kicking off a bulk pass.
+
+      Bulk backfill: no selector. Walks every row where extraction_version <
+      CURRENT_EXTRACTION_VERSION and processes them in batches. Holds the
+      backfill lock for the whole run so concurrent `index --incremental`
+      runs cleanly no-op (KM-safe).
+
+    Resumable: completed rows have their extraction_version bumped to the
+    current value, so interrupting and re-running picks up where it left off.
+    """
+    from mail_semantic_search.index import _reextract_single, _reextract_bulk
+
+    selectors = [bool(file_path), bool(message_id)]
+    if any(selectors):
+        if all(selectors):
+            handle_error("Pass at most one of --file-path or --message-id.")
+        try:
+            _reextract_single(file_path=file_path, message_id=message_id)
+        except sqlite3.Error as e:
+            handle_error(f"Database error: {e}", log_exception=True)
+        except (OSError, RuntimeError, ValueError, TypeError) as e:
+            handle_error(f"Reextract failed: {e}", log_exception=True)
+        return
+
+    try:
+        _reextract_bulk(limit=limit, batch_size=batch_size, dry_run=dry_run)
+    except sqlite3.Error as e:
+        handle_error(f"Database error: {e}", log_exception=True)
+    except (OSError, RuntimeError, ValueError, TypeError) as e:
+        handle_error(f"Reextract failed: {e}", log_exception=True)
+
+
+@main.command()
+@click.option("--file-path", help="Stage an email by its indexed file path")
+@click.option("--message-id", help="Stage an email by Message-ID")
+@click.option("--no-eml", is_flag=True, help="Skip copying the .eml itself (attachments only)")
+def stage(file_path: Optional[str], message_id: Optional[str], no_eml: bool):
+    """Copy an indexed email's attachments + .eml to ~/Documents/mailmate-staged/."""
+    from mail_semantic_search.staging import stage_email
+
+    if not file_path and not message_id:
+        handle_error("Pass --file-path or --message-id.")
+
+    try:
+        result = stage_email(
+            file_path=file_path,
+            message_id=message_id,
+            include_eml=not no_eml,
+        )
+    except sqlite3.Error as e:
+        handle_error(f"Database error: {e}", log_exception=True)
+        return
+    except (OSError, RuntimeError, ValueError, TypeError) as e:
+        handle_error(f"Stage failed: {e}", log_exception=True)
+        return
+
+    click.echo(f"{result['status']}: {result['message']}")
+    if result.get("staged_dir"):
+        click.echo(f"  dir: {result['staged_dir']}")
+    if result.get("eml_path"):
+        click.echo(f"  eml: {result['eml_path']}")
+    for a in result.get("attachments", []):
+        click.echo(f"  attachment ({a['size']} bytes, {a['content_type']}): {a['path']}")
+
+
+@main.command("clear-staged")
+@click.option("--short-hash", help="Clear a single staged email by its short hash; omit to clear all")
+def clear_staged_cmd(short_hash: Optional[str]):
+    """Remove staged email directories created by `stage`."""
+    from mail_semantic_search.staging import clear_staged
+
+    try:
+        result = clear_staged(short_hash=short_hash)
+    except (OSError, ValueError) as e:
+        handle_error(f"Clear failed: {e}", log_exception=True)
+        return
+
+    click.echo(f"{result['status']}: {result['message']}")
+
+
 @main.command("migrate-paths")
 @click.option("--old-prefix", required=True, help="Path prefix to rewrite (e.g. /emails/)")
 @click.option("--new-prefix", required=True, help="Replacement prefix (e.g. /Volumes/External Storage SSD/MailMate/Messages/)")

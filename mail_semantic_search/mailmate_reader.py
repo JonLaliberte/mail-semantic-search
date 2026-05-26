@@ -28,8 +28,27 @@ except ImportError:
 from mail_semantic_search.attachment_extractor import extract_text_from_attachment
 from mail_semantic_search.config import config
 from mail_semantic_search.database import validate_file_path
+from mail_semantic_search.html_extract import html_to_text
 
 logger = logging.getLogger(__name__)
+
+
+# Bump CURRENT_EXTRACTION_VERSION whenever parse_email_file's output for the
+# same .eml could change in a way that affects search quality. Every bump
+# MUST add a line to the changelog below. If you're not sure whether your
+# change matters, bump anyway — re-extraction is cheap, drift is not.
+#
+# Changelog:
+#   1 — 2026-05-25: Initial version. BS4+html2text HTML→text (replaces regex
+#                   strip). Footer-marker truncation. Added in_reply_to and
+#                   references headers to the parsed dict.
+#   2 — 2026-05-25: Footer-marker truncator is now line-anchored and no longer
+#                   matches "view in browser" / "view this email" (those are
+#                   preamble links, not footers). v1 had been gutting
+#                   transactional emails at the "Click here to view in browser"
+#                   line, e.g. dropping the actual bill amount on utility
+#                   reminders.
+CURRENT_EXTRACTION_VERSION = 2
 
 # Initialize parser once when legacy API is available
 _unquote_parser = UnquoteMail() if UnquoteMail is not None else None
@@ -425,6 +444,8 @@ def parse_email_file(file_path: Path, base_dir: Optional[Path] = None) -> Option
         bcc_addrs = _get_safe_header(msg, "Bcc")
         date_str = _get_safe_header(msg, "Date")
         message_id = _get_safe_header(msg, "Message-ID")
+        in_reply_to = _get_safe_header(msg, "In-Reply-To")
+        references = _get_safe_header(msg, "References")
 
         # Parse date
         date_obj = None
@@ -437,7 +458,10 @@ def parse_email_file(file_path: Path, base_dir: Optional[Path] = None) -> Option
         # Extract body text
         body_text = extract_text_from_part(msg)
 
-        # If no plain text, try to get HTML and strip tags (basic)
+        # If no plain text, convert the HTML alternative to text via BS4 +
+        # html2text (see html_extract.html_to_text for details). Replaces the
+        # naive regex strip that left <style>/<script> contents and entities
+        # behind, polluting search results and embedding vectors.
         if not body_text:
             for part in msg.walk():
                 if part.get_content_type() == "text/html":
@@ -446,8 +470,7 @@ def parse_email_file(file_path: Path, base_dir: Optional[Path] = None) -> Option
                         try:
                             charset = part.get_content_charset() or "utf-8"
                             html_content = payload.decode(charset, errors="ignore")
-                            # Basic HTML tag removal
-                            body_text = re.sub(r"<[^>]+>", "", html_content)
+                            body_text = html_to_text(html_content)
                             break
                         except (UnicodeDecodeError, LookupError):
                             pass
@@ -470,6 +493,8 @@ def parse_email_file(file_path: Path, base_dir: Optional[Path] = None) -> Option
             "body": body_text or "",
             "file_path": str(file_path),
             "attachments": attachments,
+            "in_reply_to": in_reply_to or "",
+            "references": references or "",
         }
     except (OSError, ValueError, TypeError, email.errors.MessageError) as e:
         logger.warning(f"Failed to parse email file {file_path}: {e}")

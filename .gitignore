@@ -45,6 +45,10 @@ data/
 .DS_Store
 Thumbs.db
 
+# Local AI tooling (Claude Code, Cursor, etc.)
+.claude/
+.cursor/
+
 
 
 

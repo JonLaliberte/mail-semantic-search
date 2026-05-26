@@ -82,6 +82,12 @@ All configuration is done via the `.env` file:
 - `RERANK_MAX_CANDIDATES`: Candidate pool size before rerank (default: `50`)
 - `RERANK_MAX_TEXT_CHARS`: Max candidate text length passed to reranker (default: `1200`)
 - `INCREMENTAL_OVERLAP_SECONDS`: Re-scan window subtracted from the incremental watermark to catch clock skew and odd file writes (default: `86400`)
+- `BODY_PREVIEW_LIMIT`: Max chars stored in `body_preview` (default: `5000`). The embedding text is independently capped by the model's context window (~2000 chars for BGE-base), so bumping this affects snippet display only.
+- `STAGING_DIR`: Where `stage_email_attachments` (MCP) / `stage` (CLI) copies an email's attachments + `.eml` for sandbox-accessible reads (default: `~/Documents/mailmate-staged`)
+- `MCP_TRANSPORT`: `stdio` (default — spawned by client) or `http` (standalone HTTP server, see "MCP over HTTP" below)
+- `MCP_HOST`: HTTP bind address when `MCP_TRANSPORT=http` (default: `127.0.0.1`, loopback only)
+- `MCP_PORT`: HTTP port (default: `6543`)
+- `MCP_PATH`: HTTP URL path (default: `/mcp`)
 - `LOG_PATH`: Runtime log file for internal warnings/errors/diagnostics (default: `./data/logs/mail-semantic-search.error.log`)
 - `LOG_LEVEL`: App log verbosity written to `LOG_PATH` (default: `INFO`)
 - `LOG_THIRD_PARTY_LEVEL`: Third-party library log verbosity written to `LOG_PATH` (default: `WARNING`)
@@ -139,6 +145,21 @@ Incremental behavior (`index --incremental`):
 
 - `dedup`: Remove duplicate index entries that share the same `Message-ID`, keeping the most recently indexed copy. Run `--dry-run` first to preview.
 
+- `reextract`: Re-parse and re-embed already-indexed emails using the current extractor. Use after bumping `CURRENT_EXTRACTION_VERSION` in `mailmate_reader.py` (see AGENTS.md). Two modes:
+  - **Single-email** (visual QA, prints before/after `body_preview` diff):
+    `reextract --file-path "/path/to.eml"` or `reextract --message-id "<...@...>"`
+  - **Bulk** (walks every row where `extraction_version < CURRENT_EXTRACTION_VERSION`):
+    `reextract` — optional `--limit N`, `--batch-size 64`, `--dry-run`
+  - Resumable: completed rows are bumped to the current version, so re-running picks up where it left off.
+  - Holds a **backfill lock** in `app_state` for the whole run; concurrent `index --incremental` calls print a benign "Backfill in progress; skipping" line and exit 0 (no `error`/`warning` substrings, so Keyboard Maestro / launchd job watchers don't pop alerts).
+
+- `stage`: Copy an indexed email's attachments + `.eml` to a sandbox-accessible path under `STAGING_DIR` (default `~/Documents/mailmate-staged/<short-hash>/`). Use when an MCP client's filesystem sandbox can't read the source `.eml` (e.g. an external volume that lacks Full Disk Access for the client process).
+  - `stage --file-path "/path/to.eml"` or `stage --message-id "<...@...>"`
+  - `--no-eml` to skip copying the `.eml` itself (attachments only)
+  - Idempotent: same email always stages to the same directory.
+
+- `clear-staged`: Remove staged email directories. `--short-hash X` for a single email; omit for all.
+
 ## MCP Server
 
 This project can also run as a local **stdio MCP server**. The MCP process is started by the client when needed; it does not require a separate always-on database service.
@@ -155,11 +176,14 @@ Install dependencies in your local Python environment, then run:
 mail-semantic-search-mcp
 ```
 
-Recommended initial MCP tools:
+Available MCP tools:
 - `search_emails`: semantic search with optional auto-filters and reranking
 - `query_emails`: metadata-only lookup
 - `list_inbox_emails`: newest-first inbox listing with optional account / date-range pagination (caller pages by feeding the oldest result's `date` back as `date_before`)
 - `get_status`: index and configuration summary
+- `stage_email_attachments`: copy an email's attachments + `.eml` to `STAGING_DIR` so a sandboxed client can `Read` the bytes (see `stage` CLI command above for the same operation)
+- `clear_staged_emails`: remove staged dirs (single via `short_hash` or all)
+- macOS only (when running on Darwin): `open_email`, `mark_email_read`, `archive_email`, `mark_read_and_archive`
 
 ### Claude Desktop (macOS)
 
@@ -214,6 +238,60 @@ Notes:
 - **If Option A shows zero indexed emails while Docker search works:** your host `.env` paths did not match the compose bind mount; align them or use Option B.
 - If you prefer, you can launch the module directly instead of the console script: `cd /Users/yourusername/Development/mail-semantic-search && .venv/bin/python -m mail_semantic_search.mcp_server`
 - After editing the config, fully quit and reopen Claude Desktop.
+
+### MCP over HTTP (Full Disk Access workaround for macOS)
+
+By default the MCP server runs over **stdio** — your MCP client spawns the process. macOS Full Disk Access does **not** inherit across `spawn()`, so if your maildir lives on an external volume and the MCP client (Claude Desktop, etc.) is not itself granted FDA for that volume, every read of an `.eml` blows up with `Operation not permitted`. Granting FDA to a specific spawned subprocess is unreliable.
+
+The escape hatch: run the MCP server standalone over HTTP from a process that **does** have FDA (a terminal, Keyboard Maestro, launchd) and have the MCP client connect via a stdio→HTTP bridge.
+
+**1. Start the HTTP server** (from a terminal that has FDA):
+
+```bash
+MCP_TRANSPORT=http mail-semantic-search-mcp
+```
+
+Output: `Mail Semantic Search MCP listening on http://127.0.0.1:6543/mcp`. Bound to loopback only.
+
+For auto-start at login, the simplest path is Keyboard Maestro with an "At Login" trigger running an **Execute Shell Script** action:
+
+```sh
+#!/bin/bash
+PORT="${MCP_PORT:-6543}"
+LOG="$HOME/Library/Logs/mailmate-search-mcp.log"
+BIN="/Users/yourusername/Development/mail-semantic-search/.venv/bin/mail-semantic-search-mcp"
+mkdir -p "$(dirname "$LOG")"
+# Idempotent: don't spawn a duplicate.
+if /usr/sbin/lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t >/dev/null 2>&1; then
+  echo "$(date '+%F %T') MCP already listening on $PORT, skipping" >> "$LOG"
+  exit 0
+fi
+echo "$(date '+%F %T') starting MCP on port $PORT" >> "$LOG"
+MCP_TRANSPORT=http MCP_PORT="$PORT" \
+  nohup "$BIN" >> "$LOG" 2>&1 &
+disown
+```
+
+Optionally add a second **Periodic every 5 minutes** trigger running the same script — the `lsof` check makes re-firing free, and the server auto-recovers if it ever dies.
+
+**2. Configure Claude Desktop** to use a stdio→HTTP bridge. Claude Desktop does **not** natively speak HTTP MCP — silently ignoring a bare `"url"` field. Use `mcp-remote` (npm-installed, runs via `npx`):
+
+```json
+{
+  "mcpServers": {
+    "mail-semantic-search": {
+      "command": "/Users/yourusername/.nvm/versions/node/v22.20.0/bin/npx",
+      "args": ["-y", "mcp-remote", "http://127.0.0.1:6543/mcp"]
+    }
+  }
+}
+```
+
+The absolute path to `npx` matters: Claude Desktop's spawn env does **not** include your shell `PATH`, so plain `"npx"` won't resolve when node is installed via nvm. Adjust the node version path for your machine.
+
+The bridge process has zero filesystem needs — it just relays JSON-RPC — so it does not need FDA. The HTTP server keeps its FDA via KM's grant.
+
+Python equivalent if you'd rather not depend on npm: `pip install mcp-proxy` and use `mcp-proxy` instead of `npx mcp-remote`.
 
 ## Keeping Your Index Fresh
 

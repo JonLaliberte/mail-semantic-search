@@ -268,6 +268,24 @@ def _handle_move_detection(
     return True
 
 
+def _check_backfill_lock_or_skip() -> bool:
+    """Print a KM-safe skip line and return True if a live backfill is running.
+
+    The user's Keyboard-Maestro rule pops a window when its captured output
+    contains the substrings "error" or "warning" (case-insensitive). The skip
+    line below intentionally avoids both words so incremental runs cleanly
+    no-op while a multi-hour reextract is in flight.
+    """
+    with Database() as database:
+        held = database.get_backfill_lock()
+    if held is None:
+        return False
+    pid = held.get("pid")
+    started = held.get("started_at", "")
+    print(f"Backfill in progress (pid={pid}, started {started}); skipping this incremental run.")
+    return True
+
+
 def index_emails(
     limit: Optional[int] = None,
     skip_indexed: bool = True,
@@ -282,6 +300,9 @@ def index_emails(
             f"Email directory not found: {email_dir}. "
             "Please set EMAIL_DIR in your .env file."
         )
+
+    if _check_backfill_lock_or_skip():
+        return
 
     print(f"Indexing emails from: {email_dir}")
     print(f"Using embedding model: {config.embedding_model}")
@@ -555,6 +576,206 @@ def index_emails(
             print(f"Total attachments: {db_stats_after['total_attachments']}")
 
 
+def _reextract_single(
+    file_path: Optional[str] = None,
+    message_id: Optional[str] = None,
+) -> None:
+    """Re-extract one indexed email; print a before/after diff.
+
+    Acquires the backfill lock just for the duration so a concurrent
+    `index --incremental` cleanly no-ops.
+    """
+    from mail_semantic_search.mailmate_reader import CURRENT_EXTRACTION_VERSION
+
+    with Database() as database, VectorStore() as vector_store:
+        cursor = database.conn.cursor()
+        if file_path:
+            cursor.execute(
+                "SELECT * FROM emails WHERE file_path = ? LIMIT 1", (file_path,)
+            )
+        elif message_id:
+            cursor.execute(
+                "SELECT * FROM emails WHERE message_id = ? LIMIT 1", (message_id,)
+            )
+        else:
+            raise ValueError("Pass --file-path or --message-id")
+
+        row = cursor.fetchone()
+        if row is None:
+            print("No indexed email matched the selector.")
+            return
+
+        row_dict = dict(row)
+        old_preview = (row_dict.get("body_preview") or "")[:200]
+        old_version = row_dict.get("extraction_version", 0)
+
+        path = Path(row_dict["file_path"])
+        if not path.exists():
+            print(f"missing_file: source .eml no longer exists: {row_dict['file_path']}")
+            return
+
+        database.acquire_backfill_lock()
+        try:
+            email_data = parse_email_file(path, base_dir=config.email_dir)
+            if email_data is None:
+                print("parse_failed: parse_email_file returned None")
+                return
+
+            text = combine_email_text(email_data)
+            embedding_service = EmbeddingService()
+            embeddings = embedding_service.embed_texts([text])
+
+            try:
+                file_mtime = path.stat().st_mtime
+            except OSError:
+                file_mtime = None
+
+            database.add_email(
+                email_data,
+                email_data.get("attachments", []),
+                file_mtime,
+                commit=False,
+            )
+            vector_store.add_emails([email_data], embeddings, [text])
+            database.commit()
+        finally:
+            database.release_backfill_lock()
+
+        new_preview = (email_data.get("body") or "")[:200]
+        print(f"file_path: {row_dict['file_path']}")
+        print(f"extraction_version: {old_version} → {CURRENT_EXTRACTION_VERSION}")
+        print("--- before (first 200 chars) ---")
+        print(old_preview)
+        print("--- after  (first 200 chars) ---")
+        print(new_preview)
+
+
+def _reextract_bulk(
+    limit: Optional[int] = None,
+    batch_size: int = 64,
+    dry_run: bool = False,
+) -> None:
+    """Re-extract every row with stale extraction_version.
+
+    Per-batch flow mirrors index_emails: parse all -> embed once for the
+    whole batch -> bulk SQLite upsert -> bulk Chroma upsert -> commit. The
+    single-shot embed is the perf-critical part — embedding 64 texts in one
+    call is ~10x faster than 64 individual embed calls.
+    """
+    from mail_semantic_search.mailmate_reader import CURRENT_EXTRACTION_VERSION
+
+    with Database() as database, VectorStore() as vector_store:
+        cursor = database.conn.cursor()
+
+        if dry_run:
+            cursor.execute(
+                "SELECT COUNT(*) AS cnt FROM emails WHERE extraction_version < ?",
+                (CURRENT_EXTRACTION_VERSION,),
+            )
+            cnt = cursor.fetchone()["cnt"]
+            print(f"Dry run: {cnt} stale row(s) at extraction_version < {CURRENT_EXTRACTION_VERSION}.")
+            return
+
+        sql = "SELECT id, file_path FROM emails WHERE extraction_version < ? ORDER BY id"
+        params: List[Any] = [CURRENT_EXTRACTION_VERSION]
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(limit)
+        cursor.execute(sql, params)
+        rows = [dict(r) for r in cursor.fetchall()]
+
+        total = len(rows)
+        if total == 0:
+            print("No stale rows. Nothing to reextract.")
+            return
+
+        print(f"Reextract: {total} stale row(s) at extraction_version < {CURRENT_EXTRACTION_VERSION}.")
+
+        database.acquire_backfill_lock()
+        try:
+            embedding_service = EmbeddingService()
+
+            processed = 0
+            missing = 0
+            parse_failed = 0
+            batch_errors = 0
+            t_start = time.time()
+
+            for batch_start in range(0, total, batch_size):
+                batch = rows[batch_start : batch_start + batch_size]
+
+                emails_to_write: List[Dict[str, Any]] = []
+                mtimes: Dict[str, Optional[float]] = {}
+                for r in batch:
+                    path = Path(r["file_path"])
+                    if not path.exists():
+                        missing += 1
+                        continue
+                    try:
+                        email_data = parse_email_file(path, base_dir=config.email_dir)
+                    except (OSError, ValueError, TypeError) as e:
+                        logger.warning("reextract: parse failed for %s: %s", path, e)
+                        parse_failed += 1
+                        continue
+                    if email_data is None:
+                        parse_failed += 1
+                        continue
+                    try:
+                        mtimes[email_data["file_path"]] = path.stat().st_mtime
+                    except OSError:
+                        mtimes[email_data["file_path"]] = None
+                    emails_to_write.append(email_data)
+
+                if not emails_to_write:
+                    pct = int(100 * (batch_start + len(batch)) / total)
+                    print(
+                        f"  Reextracted {batch_start + len(batch)}/{total} ({pct}%) "
+                        f"ok={processed} missing={missing} parse_failed={parse_failed} batch_errors={batch_errors}"
+                    )
+                    continue
+
+                try:
+                    texts = [combine_email_text(e) for e in emails_to_write]
+                    embeddings = embedding_service.embed_texts(texts)
+
+                    for email_data in emails_to_write:
+                        database.add_email(
+                            email_data,
+                            email_data.get("attachments", []),
+                            mtimes.get(email_data["file_path"]),
+                            commit=False,
+                        )
+                    vector_store.add_emails(emails_to_write, embeddings, texts)
+                    database.commit()
+                    processed += len(emails_to_write)
+                except (sqlite3.Error, OSError, RuntimeError, ValueError, TypeError) as e:
+                    logger.warning("reextract: batch write failed (%s); rolling back", e)
+                    try:
+                        database.conn.rollback()
+                    except sqlite3.Error:
+                        pass
+                    batch_errors += 1
+
+                elapsed = time.time() - t_start
+                done_count = batch_start + len(batch)
+                pct = int(100 * done_count / total)
+                rate = done_count / elapsed if elapsed > 0 else 0
+                eta_s = int((total - done_count) / rate) if rate > 0 else 0
+                eta_m = eta_s // 60
+                print(
+                    f"  Reextracted {done_count}/{total} ({pct}%) "
+                    f"ok={processed} missing={missing} parse_failed={parse_failed} batch_errors={batch_errors} "
+                    f"rate={rate:.1f}/s eta={eta_m}m"
+                )
+        finally:
+            database.release_backfill_lock()
+
+        print(
+            f"Done. ok={processed} missing={missing} parse_failed={parse_failed} "
+            f"batch_errors={batch_errors} target_version={CURRENT_EXTRACTION_VERSION}"
+        )
+
+
 def index_email_file(file_path: Path, force: bool = False) -> Dict[str, Any]:
     """Index a single .eml file.
 
@@ -574,6 +795,11 @@ def index_email_file(file_path: Path, force: bool = False) -> Dict[str, Any]:
     if not resolved.exists():
         result["status"] = "not_found"
         result["message"] = f"File does not exist: {resolved}"
+        return result
+
+    if _check_backfill_lock_or_skip():
+        result["status"] = "skipped"
+        result["message"] = "Backfill in progress; skipping this incremental run."
         return result
 
     email_dir = config.email_dir.resolve()

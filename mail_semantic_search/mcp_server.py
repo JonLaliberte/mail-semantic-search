@@ -1,6 +1,24 @@
-"""FastMCP server exposing mail-semantic-search tools."""
+"""FastMCP server exposing mail-semantic-search tools.
+
+Default transport is stdio (spawned by an MCP client). On macOS, when the
+parent MCP client lacks Full Disk Access, anything reading from external
+volumes blows up with EACCES — Apple does not inherit FDA across the spawn.
+To work around that, run this server standalone over HTTP from a terminal
+that DOES have FDA:
+
+    MCP_TRANSPORT=http mail-semantic-search-mcp
+
+…then point your MCP client at `http://127.0.0.1:6543/mcp` instead of
+letting it spawn the process. Defaults:
+
+    MCP_TRANSPORT  stdio | http       (default: stdio)
+    MCP_HOST       bind address       (default: 127.0.0.1, loopback only)
+    MCP_PORT       TCP port           (default: 6543)
+    MCP_PATH       URL path           (default: /mcp)
+"""
 
 import logging
+import os
 import platform
 import sys
 from datetime import datetime
@@ -20,6 +38,7 @@ from mail_semantic_search.search import (
     search_email_records_payload,
 )
 from mail_semantic_search.service_models import InboxRequest, QueryRequest, SearchRequest
+from mail_semantic_search.staging import clear_staged, stage_email
 
 logger = logging.getLogger(__name__)
 
@@ -141,6 +160,37 @@ def list_inbox_emails(
     )
 
 
+@mcp.tool
+def stage_email_attachments(
+    message_id: Optional[str] = None,
+    file_path: Optional[str] = None,
+    include_eml: bool = True,
+) -> dict:
+    """Copy an indexed email's attachments + .eml to a sandbox-accessible dir.
+
+    Use when you need to actually READ an attachment's bytes (e.g. a PDF
+    invoice, an image, a docx). The source .eml often lives on an external
+    volume the MCP client cannot access; this stages a per-email copy under
+    ~/Documents/mailmate-staged/<hash>/ where Read tools can reach it.
+
+    Pass either message_id (with or without angle brackets) or file_path.
+    Idempotent — same email always stages to the same dir; calling again
+    refreshes the contents.
+    """
+    if not message_id and not file_path:
+        return {"status": "failed", "message": "Pass message_id or file_path"}
+    return stage_email(file_path=file_path, message_id=message_id, include_eml=include_eml)
+
+
+@mcp.tool
+def clear_staged_emails(short_hash: Optional[str] = None) -> dict:
+    """Remove staged email dirs created by stage_email_attachments.
+
+    Pass short_hash to remove a single staged email; omit to clear all.
+    """
+    return clear_staged(short_hash=short_hash)
+
+
 # macOS-only MailMate actions. Registered only when running on Darwin so the
 # rest of the server still works on Linux (Docker images, etc.).
 if platform.system() == "Darwin":
@@ -172,8 +222,68 @@ if platform.system() == "Darwin":
         return _mark_read_and_archive(message_id)
 
 
+def _resolve_transport() -> tuple[str, dict]:
+    """Read MCP_TRANSPORT env (and friends) into a (transport, kwargs) pair.
+
+    Stdio stays the backwards-compatible default. HTTP is the recommended
+    mode on macOS for clients that spawn the MCP under a sandbox that lacks
+    Full Disk Access — start this server from a terminal that has FDA and
+    point the client at the URL instead.
+    """
+    transport = (os.getenv("MCP_TRANSPORT") or "stdio").lower()
+    if transport not in {"stdio", "http", "sse", "streamable-http"}:
+        raise SystemExit(
+            f"Unknown MCP_TRANSPORT={transport!r}. "
+            "Use 'stdio' (default), 'http' (recommended for macOS FDA workaround), "
+            "or 'sse' / 'streamable-http' for older clients."
+        )
+    if transport == "stdio":
+        return transport, {}
+
+    host = os.getenv("MCP_HOST", "127.0.0.1")
+    port = int(os.getenv("MCP_PORT", "6543"))
+    path = os.getenv("MCP_PATH", "/mcp")
+    return transport, {"host": host, "port": port, "path": path}
+
+
+def _log_startup_status_async() -> None:
+    """Best-effort: fetch the index status on a daemon thread.
+
+    On a 400k+ row collection this takes ~8s, which used to block the
+    listener from starting. Moving it off the critical path means HTTP
+    binds immediately and the diagnostic still lands in the log.
+    """
+    import threading
+
+    def _probe() -> None:
+        try:
+            status = get_status_data_payload()
+            logger.info(
+                "MCP startup index: total_indexed_emails=%s total_emails=%s",
+                status.get("total_indexed_emails"),
+                status.get("total_emails"),
+            )
+        except Exception as exc:
+            hint = (
+                "This is usually the MCP *parent app* (not this repo) blocking access to the "
+                "configured database path—for example SQLite on `/Volumes/...` while Docker uses "
+                "the same files fine. Same single dataset: run MCP inside `docker compose` "
+                "(see README: MCP via Docker), grant Full Disk Access, or use the HTTP transport "
+                "(MCP_TRANSPORT=http) and run this from a terminal that has FDA."
+            )
+            msg = (
+                f"MCP startup: could not open the index for a status snapshot "
+                f"({type(exc).__name__}: {exc}). The server will still serve; search/get_status "
+                f"may fail until the process can open the DB. {hint}"
+            )
+            logger.warning(msg)
+            print(msg, file=sys.stderr)
+
+    threading.Thread(target=_probe, name="mcp-startup-status", daemon=True).start()
+
+
 def main() -> None:
-    """Run the MCP server over stdio."""
+    """Run the MCP server. Defaults to stdio; HTTP via MCP_TRANSPORT=http."""
     configure_logging()
     configure_runtime_diagnostics()
     logger.info(
@@ -182,28 +292,22 @@ def main() -> None:
         config.database_path,
         config.email_dir,
     )
-    try:
-        status = get_status_data_payload()
-        logger.info(
-            "MCP startup index: total_indexed_emails=%s total_emails=%s",
-            status.get("total_indexed_emails"),
-            status.get("total_emails"),
+
+    transport, kwargs = _resolve_transport()
+    if transport != "stdio":
+        host = kwargs["host"]
+        port = kwargs["port"]
+        path = kwargs["path"]
+        startup_msg = (
+            f"Mail Semantic Search MCP listening on http://{host}:{port}{path}  "
+            f"(transport={transport})"
         )
-    except Exception as exc:
-        hint = (
-            "This is usually the MCP *parent app* (not this repo) blocking access to the configured "
-            "database path—for example SQLite on `/Volumes/...` while Docker uses the same files "
-            "fine. Same single dataset: run MCP inside `docker compose` (see README: MCP via Docker) "
-            "or grant Full Disk Access to the MCP client."
-        )
-        msg = (
-            f"MCP startup: could not open the index for a status snapshot ({type(exc).__name__}: {exc}). "
-            f"The server will still start; search/get_status may fail until the process can open the DB. "
-            f"{hint}"
-        )
-        logger.warning(msg)
-        print(msg, file=sys.stderr)
-    mcp.run()
+        logger.info(startup_msg)
+        # Print to stderr so a terminal launch shows the URL immediately.
+        print(startup_msg, file=sys.stderr)
+
+    _log_startup_status_async()
+    mcp.run(transport=transport, **kwargs)
 
 
 if __name__ == "__main__":

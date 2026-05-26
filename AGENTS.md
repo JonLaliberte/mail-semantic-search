@@ -61,6 +61,32 @@ Re-pulling later restores the published image.
 4. CI (`.github/workflows/release.yml`) builds the multi-arch (linux/amd64 + linux/arm64) image via buildx + QEMU, pushes to `ghcr.io/jonlaliberte/mail-semantic-search` with `:VERSION`, `:MAJOR.MINOR`, and `:latest` tags, and drafts a GitHub Release with auto-generated notes.
 5. **First release publishes the GHCR package as private** — flip it to Public once in the GitHub UI (Packages → Package settings → Change visibility). Subsequent publishes inherit that visibility.
 
+## Extraction versioning
+
+`CURRENT_EXTRACTION_VERSION` in `mail_semantic_search/mailmate_reader.py` is the single source of truth for "what version of the parse pipeline produced this row's `body_preview` / vectors." Every row in `emails.extraction_version` is set to this value at insert/upsert time.
+
+**Bump the constant** whenever `parse_email_file`'s output for the same `.eml` could meaningfully change — HTML conversion changes, header changes, quoted-reply behavior changes, anything that affects `body` or `combine_email_text` output. Adding tools (e.g. a new MCP action) that don't touch existing rows does NOT require a bump.
+
+**Every bump requires a changelog line** directly above the constant:
+
+```
+#   N — YYYY-MM-DD: <what changed and why>
+```
+
+`tests/test_extraction_version.py` is a tripwire that fails CI if the constant and changelog drift.
+
+After a bump, run a backfill:
+
+```bash
+.venv/bin/mail-semantic-search reextract --dry-run        # count stale rows
+.venv/bin/mail-semantic-search reextract --file-path "<one rep email>"   # visual QA
+.venv/bin/mail-semantic-search reextract --batch-size 128 # full backfill
+```
+
+The bulk path holds a backfill lock (`app_state.backfill_in_progress`) for the duration. Concurrent `index --incremental` and `index-file` calls exit cleanly with a benign message — neither output string contains `error` or `warning` substrings (case-insensitive), so KM / launchd watchers don't pop alerts mid-backfill. The lock auto-clears if the holding PID dies.
+
+Realistic rate on Apple Silicon: ~14 rows/sec at `--batch-size 128`. ~8h for 437k rows; ETA prints per-batch.
+
 ## Path migration tooling
 
 `mail-semantic-search migrate-paths --old-prefix X --new-prefix Y` rewrites indexed `file_path` values across both SQLite (`emails.file_path`, `emails.file_hash`) and Chroma (document IDs are `md5(file_path)`; `metadata['file_path']` is the stored copy). It reuses existing embeddings — no re-embed cost — and is idempotent (rows whose new IDs are already in Chroma are skipped, so interrupted runs can resume).
