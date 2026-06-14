@@ -28,6 +28,22 @@ def test_strips_script_block_contents():
     assert "var" not in out
 
 
+def test_unwraps_long_tracking_links_keeping_text():
+    long_url = "http://track.example.com/ls/click?upn=" + "a" * 200
+    html = f'<p>Please <a href="{long_url}">sign in to view your bill</a> now.</p>'
+    out = html_to_text(html)
+    assert "sign in to view your bill" in out
+    assert "track.example.com" not in out
+    assert "upn=" not in out
+
+
+def test_keeps_short_links_intact():
+    html = '<p>See <a href="https://example.com/doc">the document</a>.</p>'
+    out = html_to_text(html)
+    assert "the document" in out
+    assert "https://example.com/doc" in out
+
+
 def test_decodes_html_entities():
     html = "<p>Foo&nbsp;bar &amp; baz</p>"
     out = html_to_text(html)

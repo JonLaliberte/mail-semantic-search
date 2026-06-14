@@ -91,6 +91,27 @@ def _replace_images_with_alt(soup: BeautifulSoup) -> None:
             img.decompose()
 
 
+# Anchor hrefs longer than this are unwrapped to their visible text — the URL
+# is dropped, the link text kept. Marketing/tracking URLs run 1,000+ chars of
+# opaque `upn=...` params and are pure noise in a search index and embedding
+# vector; human-meaningful links (a domain, a doc, a mailto:) sit well under
+# this. The full URL always survives in the original .eml on disk, so anything
+# dropped here is one click away by opening the message.
+_MAX_LINK_HREF_CHARS = 150
+
+
+def _strip_long_links(soup: BeautifulSoup) -> None:
+    """Unwrap <a> tags whose href exceeds _MAX_LINK_HREF_CHARS, keeping text."""
+    for a in list(soup.find_all("a")):
+        if not isinstance(a, Tag):
+            continue
+        href = a.get("href") or ""
+        if isinstance(href, list):
+            href = " ".join(href)
+        if len(href) > _MAX_LINK_HREF_CHARS:
+            a.unwrap()
+
+
 def _truncate_at_footer_marker(text: str) -> str:
     """Drop everything from the earliest line-anchored footer marker onward.
 
@@ -133,7 +154,9 @@ def _build_converter() -> html2text.HTML2Text:
     h.ignore_images = True    # we've already replaced/decomposed them
     h.ignore_emphasis = True  # drop *bold* markers
     h.single_line_break = True
-    # Keep links — default format is [text](url), which is what we want.
+    # Keep links as [text](url). Long tracking URLs are already unwrapped to
+    # plain text upstream by _strip_long_links, so only short, meaningful links
+    # reach html2text and survive in the output.
     return h
 
 
@@ -141,9 +164,9 @@ def html_to_text(html: str) -> str:
     """Convert email-body HTML to clean plain text.
 
     Steps: parse with lxml -> drop style/script/head/etc. -> drop hidden /
-    preheader elements -> replace <img> with alt text -> html2text markdown
-    -> collapse redundant link syntax -> truncate at footer markers ->
-    squeeze blank runs.
+    preheader elements -> replace <img> with alt text -> unwrap long tracking
+    links to text -> html2text markdown -> collapse redundant link syntax ->
+    truncate at footer markers -> squeeze blank runs.
     """
     if not html:
         return ""
@@ -168,6 +191,7 @@ def _html_to_text_inner(html: str) -> str:
 
     _drop_hidden(soup)
     _replace_images_with_alt(soup)
+    _strip_long_links(soup)
 
     cleaned_html = str(soup)
 

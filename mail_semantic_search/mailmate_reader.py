@@ -48,7 +48,21 @@ logger = logging.getLogger(__name__)
 #                   transactional emails at the "Click here to view in browser"
 #                   line, e.g. dropping the actual bill amount on utility
 #                   reminders.
-CURRENT_EXTRACTION_VERSION = 2
+#   3 — 2026-06-08: Prefer the HTML alternative over text/plain (fall back to
+#                   plain only when HTML is absent or html_to_text collapses to
+#                   < 50% of plain length). text/plain copies were omitting
+#                   structured fields — account numbers, bill/due dates, totals
+#                   — that senders include only in the HTML body. Also unwrap
+#                   tracking-link URLs > 150 chars to their anchor text in
+#                   html_extract, so the now-dominant HTML path doesn't flood
+#                   bodies/embeddings with opaque marketing URLs.
+CURRENT_EXTRACTION_VERSION = 3
+
+# Minimum stripped length for an HTML-derived body to be trusted over the
+# text/plain alternative. Below this, html_to_text effectively returned nothing
+# (a genuine parse failure) and we fall back to plain text. This is an absolute
+# floor, NOT a ratio against plain-text length — see parse_email_file.
+_MIN_HTML_BODY_CHARS = 30
 
 # Initialize parser once when legacy API is available
 _unquote_parser = UnquoteMail() if UnquoteMail is not None else None
@@ -274,6 +288,28 @@ def extract_text_from_part(part) -> Optional[str]:
     return None
 
 
+def extract_html_text(msg) -> Optional[str]:
+    """Return cleaned text from the first text/html part, or None.
+
+    Runs the part's HTML through html_extract.html_to_text (BS4 cleanup +
+    html2text + footer truncation). text/plain alternatives often drop the
+    structured fields a transactional email carries only in its HTML body
+    (account numbers, due dates, totals), so callers prefer this output.
+    """
+    for part in msg.walk():
+        if part.get_content_type() == "text/html":
+            payload = part.get_payload(decode=True)
+            if not payload:
+                continue
+            try:
+                charset = part.get_content_charset() or "utf-8"
+                html_content = payload.decode(charset, errors="ignore")
+            except (UnicodeDecodeError, LookupError):
+                html_content = payload.decode("utf-8", errors="ignore")
+            return html_to_text(html_content)
+    return None
+
+
 def remove_quoted_reply(text: str, file_path: Optional[Path] = None) -> str:
     """Remove quoted reply sections from email body."""
     if not text:
@@ -455,25 +491,26 @@ def parse_email_file(file_path: Path, base_dir: Optional[Path] = None) -> Option
             except (ValueError, TypeError):
                 pass
 
-        # Extract body text
-        body_text = extract_text_from_part(msg)
+        # Extract body text. Prefer the HTML alternative (cleaned via BS4 +
+        # html2text — see html_extract.html_to_text): multipart/alternative
+        # senders routinely strip structured fields (account numbers, due
+        # dates, totals) from their text/plain copy that survive only in the
+        # HTML. Fall back to plain text only when HTML is absent or extraction
+        # collapsed to essentially nothing (empty/whitespace) — a genuine parse
+        # failure. We deliberately do NOT compare against the plain-text length:
+        # link-stripping intentionally shortens clean HTML, and the plain-text
+        # copy is often the noisier source (bare tracking URLs, no structure),
+        # so a ratio test would wrongly fall back to it for clean, terse HTML.
+        plain_text = extract_text_from_part(msg)
+        html_text = extract_html_text(msg)
 
-        # If no plain text, convert the HTML alternative to text via BS4 +
-        # html2text (see html_extract.html_to_text for details). Replaces the
-        # naive regex strip that left <style>/<script> contents and entities
-        # behind, polluting search results and embedding vectors.
-        if not body_text:
-            for part in msg.walk():
-                if part.get_content_type() == "text/html":
-                    payload = part.get_payload(decode=True)
-                    if payload:
-                        try:
-                            charset = part.get_content_charset() or "utf-8"
-                            html_content = payload.decode(charset, errors="ignore")
-                            body_text = html_to_text(html_content)
-                            break
-                        except (UnicodeDecodeError, LookupError):
-                            pass
+        # The floor only gates HTML against an *available* plain alternative.
+        # With no plain part there's nothing to fall back to, so keep whatever
+        # HTML produced (even if short).
+        if html_text and (not plain_text or len(html_text.strip()) >= _MIN_HTML_BODY_CHARS):
+            body_text = html_text
+        else:
+            body_text = plain_text
 
         # Remove quoted replies from body text
         if body_text:
