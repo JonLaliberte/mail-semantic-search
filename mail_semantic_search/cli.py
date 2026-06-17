@@ -61,7 +61,7 @@ def handle_error(
 
 
 @click.group()
-@click.version_option(version="0.1.0")
+@click.version_option(package_name="mail-semantic-search")
 def main():
     """mail-semantic-search - Semantic search for local email files.
 
