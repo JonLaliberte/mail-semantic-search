@@ -73,7 +73,12 @@ class Database:
         
         # Issue #15: Enable WAL mode for better performance and concurrent reads
         self.conn.execute("PRAGMA journal_mode=WAL")
-        
+
+        # WAL still serializes writers; without a busy_timeout a second writer
+        # raises "database is locked" immediately. Wait briefly instead so two
+        # near-simultaneous index runs don't lose batches to transient locks.
+        self.conn.execute("PRAGMA busy_timeout=5000")
+
         # Issue #1: Enable foreign key constraints (required for ON DELETE CASCADE)
         self.conn.execute("PRAGMA foreign_keys = ON")
         
@@ -789,25 +794,53 @@ class Database:
             return None
         return payload
 
-    def acquire_backfill_lock(self) -> None:
-        """Claim the backfill lock for the current process.
+    def acquire_backfill_lock(self, kind: str = "backfill") -> None:
+        """Claim the index lock for the current process.
 
-        Raises RuntimeError if a live PID currently holds the lock.
+        `kind` ("backfill", "incremental", or "full") is recorded so a process
+        that has to skip can report what is actually running.
+
+        Acquisition is atomic for the common case (no prior lock) via
+        ``INSERT ... ON CONFLICT DO NOTHING``: when two processes race, exactly
+        one inserts the row (rowcount 1) and the loser falls through to find the
+        live holder and raise. Re-acquiring our own lock or reclaiming a dead
+        PID's lock both succeed.
+
+        Raises RuntimeError if a live PID other than ours holds the lock.
         """
-        existing = self.get_backfill_lock()
-        if existing is not None and existing.get("pid") != os.getpid():
-            raise RuntimeError(
-                f"Backfill lock already held by pid={existing['pid']} "
-                f"(started {existing.get('started_at')})"
-            )
-
         payload = json.dumps(
             {
                 "pid": os.getpid(),
                 "started_at": datetime.now().isoformat(),
+                "kind": kind,
             }
         )
         cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO app_state (key, value, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(key) DO NOTHING
+            """,
+            (self._BACKFILL_LOCK_KEY, payload),
+        )
+        if cursor.rowcount == 1:
+            # No prior row existed — we won the insert.
+            self.conn.commit()
+            return
+
+        # A row already exists. Inspect the holder (dead/garbage -> None).
+        existing = self.get_backfill_lock()
+        if existing is not None and existing.get("pid") != os.getpid():
+            self.conn.rollback()
+            raise RuntimeError(
+                f"Index lock already held by pid={existing['pid']} "
+                f"(kind={existing.get('kind', 'backfill')}, "
+                f"started {existing.get('started_at')})"
+            )
+
+        # Our own lock (idempotent re-acquire) or a dead/garbage holder
+        # (reclaim): overwrite it.
         cursor.execute(
             """
             INSERT INTO app_state (key, value, updated_at)
