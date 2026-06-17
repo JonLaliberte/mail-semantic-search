@@ -52,7 +52,7 @@ Re-pulling later restores the published image.
    - **Patch** for bugfixes and perf improvements with no API or layout change.
    - **Minor** for new features, new CLI commands, or changes to `docker-compose.yml` that existing users must adapt to.
    - **Major** reserved for breaking API or data-format changes that require manual migration.
-2. Commit the version bump together with the change it gates (not as a separate "bump version" commit).
+2. Commit the version bump together with the change it gates (not as a separate "bump version" commit). CI enforces this: the `Require version bump` workflow (`.github/workflows/version-bump.yml`) fails any PR that touches `mail_semantic_search/**` without changing `version` in `pyproject.toml`. It checks that a bump happened, not that the semver level is right — that stays your call.
 3. Tag and push:
    ```bash
    git tag -a v0.5.0 -m "Release 0.5.0"
