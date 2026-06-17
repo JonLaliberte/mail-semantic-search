@@ -6,9 +6,10 @@ import os
 import sqlite3
 import threading
 import time
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, TypedDict
+from typing import Any, Dict, Iterator, List, Optional, TypedDict
 
 from tqdm import tqdm
 
@@ -268,22 +269,78 @@ def _handle_move_detection(
     return True
 
 
-def _check_backfill_lock_or_skip() -> bool:
-    """Print a KM-safe skip line and return True if a live backfill is running.
+def _print_lock_skip(held: Dict[str, Any]) -> None:
+    """Print a KM-safe skip line describing the live lock holder.
 
     The user's Keyboard-Maestro rule pops a window when its captured output
-    contains the substrings "error" or "warning" (case-insensitive). The skip
-    line below intentionally avoids both words so incremental runs cleanly
-    no-op while a multi-hour reextract is in flight.
+    contains the substrings "error" or "warning" (case-insensitive). Both
+    branches below intentionally avoid those words so incremental runs cleanly
+    no-op while a longer job (a multi-hour reextract or another index run) is
+    in flight.
+    """
+    pid = held.get("pid")
+    started = held.get("started_at", "")
+    if held.get("kind") == "backfill":
+        print(
+            f"Backfill in progress (pid={pid}, started {started}); "
+            "skipping this incremental run."
+        )
+    else:
+        print(
+            f"Indexing already in progress (pid={pid}, started {started}); "
+            "skipping this incremental run."
+        )
+
+
+def _check_backfill_lock_or_skip() -> bool:
+    """Print a KM-safe skip line and return True if a live lock is held.
+
+    Read-only check used by the single-file index path: it skips while either
+    a backfill or another index run holds the lock, but never acquires one.
     """
     with Database() as database:
         held = database.get_backfill_lock()
     if held is None:
         return False
-    pid = held.get("pid")
-    started = held.get("started_at", "")
-    print(f"Backfill in progress (pid={pid}, started {started}); skipping this incremental run.")
+    _print_lock_skip(held)
     return True
+
+
+def _acquire_index_lock_or_skip(kind: str) -> bool:
+    """Acquire the index lock for this run; return True on success.
+
+    Returns False (after printing a KM-safe skip line) when another live
+    process — a backfill or a concurrent index run — already holds it, so the
+    caller can cleanly no-op instead of duplicating work and contending on
+    SQLite/Chroma writes. The lock is persisted in the app_state table, so it
+    outlives this short-lived connection; release it via
+    _release_index_lock_on_exit.
+    """
+    with Database() as database:
+        try:
+            database.acquire_backfill_lock(kind=kind)
+            return True
+        except RuntimeError:
+            held = database.get_backfill_lock()
+            if held is not None:
+                _print_lock_skip(held)
+            return False
+
+
+@contextmanager
+def _release_index_lock_on_exit() -> Iterator[None]:
+    """Release the index lock when the run finishes (even on error/Ctrl-C).
+
+    Acquisition happens up front via _acquire_index_lock_or_skip; this guard
+    only guarantees the lock is cleared. It opens its own short-lived
+    connection because the lock lives in the app_state table, not on any one
+    connection.
+    """
+    try:
+        yield
+    finally:
+        with Database() as database:
+            database.release_backfill_lock()
 
 
 def index_emails(
@@ -301,7 +358,12 @@ def index_emails(
             "Please set EMAIL_DIR in your .env file."
         )
 
-    if _check_backfill_lock_or_skip():
+    # Hold the index lock for the whole run so a second `index` /
+    # `index --incremental` process cleanly no-ops instead of duplicating the
+    # scan+embed work and contending on SQLite/Chroma writes. Also skips while
+    # a backfill is in flight (its lock is "backfill"-kinded).
+    lock_kind = "incremental" if (incremental and skip_indexed) else "full"
+    if not _acquire_index_lock_or_skip(lock_kind):
         return
 
     print(f"Indexing emails from: {email_dir}")
@@ -314,8 +376,10 @@ def index_emails(
             os.getpid(),
         )
 
-    # Initialize services with context managers for proper cleanup
-    with Database() as database, VectorStore() as vector_store:
+    # Initialize services with context managers for proper cleanup. The lock
+    # guard is entered first so it is exited last, releasing the lock even if
+    # opening the database or vector store fails.
+    with _release_index_lock_on_exit(), Database() as database, VectorStore() as vector_store:
         # Pre-run get_stats() costs ~10s on Chroma collections with hundreds
         # of thousands of rows when running under macOS Docker's filesystem
         # shim. The "Already indexed: X emails" log line was nice-to-have,

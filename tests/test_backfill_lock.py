@@ -104,3 +104,110 @@ def test_no_lock_returns_false_from_check(tmp_path, monkeypatch):
     db.close()
 
     assert _check_backfill_lock_or_skip() is False
+
+
+# --- kind-tagged lock + incremental run mutual exclusion ---------------------
+
+
+def _inject_foreign_lock(db: Database, kind: str, pid: int = 424242) -> None:
+    """Write a lock payload as if another process (pid) held it."""
+    import json
+    from datetime import datetime
+
+    payload = json.dumps(
+        {"pid": pid, "started_at": datetime.now().isoformat(), "kind": kind}
+    )
+    cursor = db.conn.cursor()
+    cursor.execute(
+        "INSERT INTO app_state (key, value) VALUES (?, ?)",
+        (Database._BACKFILL_LOCK_KEY, payload),
+    )
+    db.conn.commit()
+
+
+def test_acquire_lock_defaults_to_backfill_kind(tmp_path):
+    db = _make_db(tmp_path)
+    db.acquire_backfill_lock()
+    held = db.get_backfill_lock()
+    assert held["kind"] == "backfill"
+    db.release_backfill_lock()
+    db.close()
+
+
+def test_acquire_lock_records_kind(tmp_path):
+    db = _make_db(tmp_path)
+    db.acquire_backfill_lock(kind="incremental")
+    held = db.get_backfill_lock()
+    assert held["kind"] == "incremental"
+    db.release_backfill_lock()
+    db.close()
+
+
+def test_acquire_raises_when_live_other_pid_holds_lock(tmp_path, monkeypatch):
+    db = _make_db(tmp_path)
+    _inject_foreign_lock(db, kind="incremental")
+    # Treat the foreign PID as alive so the lock is considered held.
+    monkeypatch.setattr(Database, "_pid_is_alive", staticmethod(lambda pid: True))
+    with pytest.raises(RuntimeError):
+        db.acquire_backfill_lock(kind="incremental")
+    db.close()
+
+
+def test_acquire_index_lock_or_skip_acquires_when_free(tmp_path, monkeypatch):
+    import mail_semantic_search.config as cfg_mod
+    from mail_semantic_search.index import _acquire_index_lock_or_skip
+
+    monkeypatch.setattr(cfg_mod.config, "database_path", tmp_path / "free.db")
+
+    assert _acquire_index_lock_or_skip("incremental") is True
+
+    db = Database()
+    held = db.get_backfill_lock()
+    assert held is not None
+    assert held["pid"] == os.getpid()
+    assert held["kind"] == "incremental"
+    db.release_backfill_lock()
+    db.close()
+
+
+def test_acquire_index_lock_or_skip_skips_when_index_run_holds_lock(
+    tmp_path, monkeypatch, capsys
+):
+    import mail_semantic_search.config as cfg_mod
+    from mail_semantic_search.index import _acquire_index_lock_or_skip
+
+    monkeypatch.setattr(cfg_mod.config, "database_path", tmp_path / "busy.db")
+
+    db = Database()
+    _inject_foreign_lock(db, kind="incremental")
+    db.close()
+    monkeypatch.setattr(Database, "_pid_is_alive", staticmethod(lambda pid: True))
+
+    assert _acquire_index_lock_or_skip("incremental") is False
+
+    out = capsys.readouterr().out
+    assert "Indexing already in progress" in out
+    # KM rule pops a window on these substrings — the skip line must avoid them.
+    assert "error" not in out.lower()
+    assert "warning" not in out.lower()
+
+
+def test_acquire_index_lock_or_skip_skips_when_backfill_holds_lock(
+    tmp_path, monkeypatch, capsys
+):
+    import mail_semantic_search.config as cfg_mod
+    from mail_semantic_search.index import _acquire_index_lock_or_skip
+
+    monkeypatch.setattr(cfg_mod.config, "database_path", tmp_path / "busy2.db")
+
+    db = Database()
+    _inject_foreign_lock(db, kind="backfill")
+    db.close()
+    monkeypatch.setattr(Database, "_pid_is_alive", staticmethod(lambda pid: True))
+
+    assert _acquire_index_lock_or_skip("incremental") is False
+
+    out = capsys.readouterr().out
+    assert "Backfill in progress" in out
+    assert "error" not in out.lower()
+    assert "warning" not in out.lower()
