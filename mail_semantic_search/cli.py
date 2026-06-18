@@ -361,6 +361,76 @@ def dedup(dry_run: bool):
 
 @main.command()
 @click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Report how many entries would be pruned without deleting anything",
+)
+@click.option(
+    "--batch-size",
+    type=int,
+    default=1000,
+    help="Rows deleted per commit batch (default: 1000)",
+)
+def prune(dry_run: bool, batch_size: int):
+    """Remove index entries whose .eml file no longer exists on disk.
+
+    Scans the mail directory once, then deletes any SQLite row (and its
+    matching ChromaDB vector) whose file_path is gone. This reconciles the
+    common case where emails were deleted or moved in MailMate but their index
+    rows lingered — the SQLite table never prunes vanished files on its own —
+    bringing the SQLite and ChromaDB counts back into agreement.
+
+    Safe to run multiple times (idempotent).
+    """
+    from pathlib import Path
+
+    from mail_semantic_search.config import config
+    from mail_semantic_search.mailmate_reader import scan_eml_files
+
+    email_dir = config.email_dir
+    if not Path(email_dir).exists():
+        handle_error(
+            f"Mail directory not found: {email_dir}. Refusing to prune — an "
+            "unavailable directory would look like every email was deleted."
+        )
+        return
+
+    click.echo(f"Scanning for current .eml files in: {email_dir}")
+    present_paths = {str(p) for p in scan_eml_files(email_dir, show_progress=False)}
+
+    if not present_paths:
+        handle_error(
+            f"No .eml files found under {email_dir}. Refusing to prune — this "
+            "usually means the drive is unmounted or the path is wrong, not "
+            "that every indexed email is stale."
+        )
+        return
+
+    click.echo(f"Found {len(present_paths)} emails on disk.")
+
+    try:
+        with Database() as database, VectorStore() as vector_store:
+            if dry_run:
+                missing, present = database.count_missing_files(present_paths)
+                click.echo(
+                    f"Dry run: {missing} orphaned row(s) would be pruned, "
+                    f"{present} kept."
+                )
+                return
+
+            click.echo("Pruning index entries with no file on disk...")
+            removed, kept = database.prune_missing_files(
+                vector_store, present_paths=present_paths, batch_size=batch_size
+            )
+            click.echo(f"Done. Pruned {removed} orphaned row(s); kept {kept}.")
+    except sqlite3.Error as e:
+        handle_error(f"Database error: {e}", log_exception=True)
+    except (OSError, RuntimeError, ValueError, TypeError) as e:
+        handle_error(f"Prune failed: {e}", log_exception=True)
+
+
+@main.command()
+@click.option(
     "--file-path",
     help="Reextract one email by its exact file path",
 )

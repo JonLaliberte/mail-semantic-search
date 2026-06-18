@@ -145,6 +145,8 @@ Incremental behavior (`index --incremental`):
 
 - `dedup`: Remove duplicate index entries that share the same `Message-ID`, keeping the most recently indexed copy. Run `--dry-run` first to preview.
 
+- `prune`: Remove index entries whose backing `.eml` file no longer exists on disk. The SQLite table never drops vanished files on its own, so over time it accumulates orphaned rows for emails deleted or moved in MailMate, drifting above the ChromaDB count. `prune` scans the mail directory once and deletes the orphaned rows (and their ChromaDB vectors), reconciling the two counts. Aborts if the mail directory is missing or the scan finds zero files (so an unmounted drive can't wipe the index). Run `--dry-run` first to preview; `--batch-size N` controls the delete-commit batch (default 1000). Idempotent.
+
 - `reextract`: Re-parse and re-embed already-indexed emails using the current extractor. Use after bumping `CURRENT_EXTRACTION_VERSION` in `mailmate_reader.py` (see AGENTS.md). Two modes:
   - **Single-email** (visual QA, prints before/after `body_preview` diff):
     `reextract --file-path "/path/to.eml"` or `reextract --message-id "<...@...>"`
