@@ -416,6 +416,91 @@ class Database:
         )
         return group_count, rows_to_remove
 
+    @staticmethod
+    def _path_is_present(file_path: str, present_paths: Optional[set]) -> bool:
+        """Whether the .eml backing this row still exists.
+
+        ``present_paths`` is an optional pre-scanned set of on-disk paths used
+        as a fast path: membership means present without a stat. Any path NOT
+        in the set is confirmed with os.path.exists before being treated as
+        missing — that guards rows whose file lives outside the scanned root.
+        """
+        if present_paths is not None and file_path in present_paths:
+            return True
+        return os.path.exists(file_path)
+
+    def count_missing_files(
+        self, present_paths: Optional[set] = None
+    ) -> Tuple[int, int]:
+        """Count index rows whose backing file is gone vs. still present.
+
+        Returns (missing_count, present_count). Read-only — used for dry runs.
+        """
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT file_path FROM emails")
+        rows = cursor.fetchall()
+        missing = 0
+        present = 0
+        for row in rows:
+            fp = row["file_path"] if isinstance(row, sqlite3.Row) else row[0]
+            if self._path_is_present(fp, present_paths):
+                present += 1
+            else:
+                missing += 1
+        return missing, present
+
+    def prune_missing_files(
+        self,
+        vector_store,
+        present_paths: Optional[set] = None,
+        batch_size: int = 1000,
+    ) -> Tuple[int, int]:
+        """Delete index entries whose backing .eml file no longer exists.
+
+        Removes each orphaned row from both SQLite and ChromaDB. A row is an
+        orphan when its file_path is neither in ``present_paths`` nor present
+        on disk (see :meth:`_path_is_present`).
+
+        Deletions are committed in batches of ``batch_size`` so an interrupted
+        run leaves a consistent store and can simply be re-run.
+
+        Returns (removed_count, kept_count).
+        """
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT file_path FROM emails")
+        all_paths = [
+            (row["file_path"] if isinstance(row, sqlite3.Row) else row[0])
+            for row in cursor.fetchall()
+        ]
+
+        removed = 0
+        kept = 0
+        orphan_batch: List[str] = []
+
+        def _flush(batch: List[str]) -> None:
+            if not batch:
+                return
+            # Chroma first; if it fails we keep the SQLite rows so a re-run retries.
+            vector_store.delete_emails(batch)
+            placeholders = ",".join("?" * len(batch))
+            cursor.execute(
+                f"DELETE FROM emails WHERE file_path IN ({placeholders})", batch
+            )
+            self.conn.commit()
+
+        for fp in all_paths:
+            if self._path_is_present(fp, present_paths):
+                kept += 1
+                continue
+            orphan_batch.append(fp)
+            removed += 1
+            if len(orphan_batch) >= batch_size:
+                _flush(orphan_batch)
+                orphan_batch = []
+
+        _flush(orphan_batch)
+        return removed, kept
+
     def add_email(
         self,
         email_data: Dict,
