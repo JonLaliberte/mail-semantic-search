@@ -98,6 +98,8 @@ Normal CLI output stays in the terminal. Internal warnings, diagnostics, and tra
 
 ## Releases
 
+Versioning is automatic: every merge to `main` with a [Conventional Commit](https://www.conventionalcommits.org/) title is analyzed by [python-semantic-release](https://python-semantic-release.readthedocs.io/), which computes the next semantic version, tags it `vX.Y.Z`, and publishes a GitHub Release plus the Docker image below — no manual version bumps. (Maintainer/agent details live in `AGENTS.md`.)
+
 Tagged releases are published as multi-arch (amd64 + arm64) Docker images to GitHub Container Registry:
 
 ```

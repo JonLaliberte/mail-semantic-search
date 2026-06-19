@@ -1,7 +1,5 @@
 """mail-semantic-search"""
 
-__version__ = "0.1.0"
+from mail_semantic_search.version import resolve_version
 
-
-
-
+__version__ = resolve_version()
