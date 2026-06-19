@@ -46,20 +46,43 @@ docker compose run --rm mail-semantic-search index --incremental
 
 Re-pulling later restores the published image.
 
+## Commit & PR conventions (READ THIS — agents included)
+
+Releases are **fully automatic** and driven by [Conventional Commits](https://www.conventionalcommits.org/). **Never bump a version by hand** — there is no static `version` in `pyproject.toml` (it's derived from git tags by setuptools-scm).
+
+PRs are **squash-merged using the PR title as the commit subject**, so the one rule that matters:
+
+> **Every PR title MUST be a Conventional Commit:** `type: subject`
+> (e.g. `feat: add prune command`, `fix: handle empty mailbox`).
+
+CI enforces it — the `PR Title` workflow (`.github/workflows/pr-title.yml`) fails any PR whose title isn't valid. A non-conventional title would silently skip the release and leave the next deploy unversioned, which is exactly what this setup prevents.
+
+Title prefix → version bump (computed by python-semantic-release):
+
+| Prefix | Bump | Example |
+|---|---|---|
+| `fix:`, `perf:` | patch | `0.9.0 → 0.9.1` |
+| `feat:` | minor | `0.9.0 → 0.10.0` |
+| `feat!:` / `BREAKING CHANGE:` footer | minor while < 1.0.0 (`major_on_zero=false`) | `0.9.0 → 0.10.0` |
+| `chore:`, `docs:`, `refactor:`, `test:`, `ci:`, `build:`, `style:` | no release | — |
+
+If a change should ship but the natural type is no-release, title the PR `feat:`/`fix:` so a version is actually cut. While pre-1.0, breaking changes bump the minor; promote to `1.0.0` with a manual tag when ready.
+
 ## Releasing a new version (maintainers)
 
-1. Bump `version` in `pyproject.toml` following semver:
-   - **Patch** for bugfixes and perf improvements with no API or layout change.
-   - **Minor** for new features, new CLI commands, or changes to `docker-compose.yml` that existing users must adapt to.
-   - **Major** reserved for breaking API or data-format changes that require manual migration.
-2. Commit the version bump together with the change it gates (not as a separate "bump version" commit). CI enforces this: the `Require version bump` workflow (`.github/workflows/version-bump.yml`) fails any PR that touches `mail_semantic_search/**` without changing `version` in `pyproject.toml`. It checks that a bump happened, not that the semver level is right — that stays your call.
-3. Tag and push:
-   ```bash
-   git tag -a v0.5.0 -m "Release 0.5.0"
-   git push origin v0.5.0
-   ```
-4. CI (`.github/workflows/release.yml`) builds the multi-arch (linux/amd64 + linux/arm64) image via buildx + QEMU, pushes to `ghcr.io/jonlaliberte/mail-semantic-search` with `:VERSION`, `:MAJOR.MINOR`, and `:latest` tags, and drafts a GitHub Release with auto-generated notes.
-5. **First release publishes the GHCR package as private** — flip it to Public once in the GitHub UI (Packages → Package settings → Change visibility). Subsequent publishes inherit that visibility.
+Releases happen on their own:
+
+1. Merge a PR to `main` with a Conventional Commit title (see above).
+2. On push to `main`, `.github/workflows/release.yml` runs `python-semantic-release` in **tag-only** mode (`commit: false`): it computes the next semver from the commits since the last `v*` tag and, if anything is releasable, creates the `vX.Y.Z` tag and a GitHub Release. Nothing is committed back to `main` (so it works with branch protection — no PAT needed).
+3. A dependent `docker` job builds the multi-arch (amd64+arm64) image, stamps it with `APP_VERSION`/`GIT_SHA` build-args, and pushes to `ghcr.io/jonlaliberte/mail-semantic-search` with `:VERSION`, `:MAJOR.MINOR`, and `:latest` tags.
+
+Runtime version resolution lives in `mail_semantic_search/version.py`: `APP_VERSION` env → installed package metadata (filled by setuptools-scm from the tag) → `0.0.0.dev0` fallback. So `--version`/`status` always report a version, and nothing is ever unversioned.
+
+**One-time repo settings (GitHub UI — can't be set from files):**
+- Settings → General → Pull Requests → "Default commit message" for squash merge = **"Pull request title"** (so the squash subject is the Conventional Commit the release reads).
+- **First GHCR publish is private** — flip the package to Public once (Packages → Package settings → Change visibility). Later publishes inherit it.
+
+To cut a release without a new merge (or re-run after a hiccup), trigger the `Release` workflow via **workflow_dispatch**.
 
 ## Extraction versioning
 

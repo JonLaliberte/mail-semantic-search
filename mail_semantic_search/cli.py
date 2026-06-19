@@ -25,6 +25,7 @@ from mail_semantic_search.search import (
     search_emails,
 )
 from mail_semantic_search.service_models import QueryRequest
+from mail_semantic_search.version import resolve_commit, resolve_version
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +62,10 @@ def handle_error(
 
 
 @click.group()
-@click.version_option(package_name="mail-semantic-search")
+@click.version_option(
+    version=resolve_version(),
+    message=f"%(prog)s %(version)s (commit {resolve_commit()})",
+)
 def main():
     """mail-semantic-search - Semantic search for local email files.
 
@@ -303,6 +307,7 @@ def status():
 
         print("Semantic Search Status")
         print("=" * 40)
+        print(f"Version: {resolve_version()} (commit {resolve_commit()})")
         print(f"Embedding Model: {status_data.embedding_model}")
         print(f"Email Directory: {status_data.email_directory}")
         print(f"ChromaDB Path: {status_data.chromadb_path}")

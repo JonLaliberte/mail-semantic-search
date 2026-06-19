@@ -1,0 +1,24 @@
+name: PR Title
+
+# Releases are driven by Conventional Commits, and PRs are squash-merged using
+# the PR title as the commit subject. This fails any PR whose title is not a
+# valid Conventional Commit (e.g. "feat: add prune command"), so every merge to
+# main is releasable and the version bump is never silently skipped.
+#
+# Requires the repo's squash-merge default commit message to be set to
+# "Pull request title" (Settings -> General -> Pull Requests).
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  pull-requests: read
+
+jobs:
+  lint-title:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: amannn/action-semantic-pull-request@v5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
