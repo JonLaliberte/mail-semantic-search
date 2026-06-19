@@ -25,6 +25,7 @@ jobs:
       version: ${{ steps.release.outputs.version }}
       tag: ${{ steps.release.outputs.tag }}
       is_prerelease: ${{ steps.release.outputs.is_prerelease }}
+      commit_sha: ${{ steps.release.outputs.commit_sha }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -80,7 +81,7 @@ jobs:
           push: true
           build-args: |
             APP_VERSION=${{ needs.release.outputs.version }}
-            GIT_SHA=${{ github.sha }}
+            GIT_SHA=${{ needs.release.outputs.commit_sha }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
