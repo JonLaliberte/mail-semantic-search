@@ -1,6 +1,8 @@
 [project]
 name = "mail-semantic-search"
-version = "0.8.2"
+# Version is derived from git tags by setuptools-scm (see [tool.setuptools_scm]).
+# Do NOT add a static `version` here — releases are automatic; see AGENTS.md.
+dynamic = ["version"]
 description = "Local semantic search for email files using embeddings and vector search"
 requires-python = ">=3.10"
 dependencies = [
@@ -31,7 +33,28 @@ mail-semantic-search-mcp = "mail_semantic_search.mcp_server:main"
 packages = ["mail_semantic_search"]
 
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+requires = ["setuptools>=61.0", "setuptools_scm>=8", "wheel"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools_scm]
+# Version comes from the latest `v*` git tag. Untagged commits get a PEP 440
+# dev version (e.g. 0.9.1.dev3+g<sha>). In Docker the build can't see .git, so
+# the release workflow passes SETUPTOOLS_SCM_PRETEND_VERSION via build-arg.
+fallback_version = "0.0.0.dev0"
+
+[tool.semantic_release]
+# Tag-only mode: PSR computes the next version from Conventional Commits and
+# creates the `vX.Y.Z` tag + GitHub Release. It does NOT write the version into
+# any source file (no version_toml/version_variables) and the workflow runs it
+# with commit=false/changelog=false, so nothing is committed back to main.
+tag_format = "v{version}"
+commit_parser = "conventional"
+allow_zero_version = true   # stay on 0.x
+major_on_zero = false       # breaking changes bump minor while < 1.0.0
+build_command = ""          # no PyPI build; the Docker image is built separately
+
+[tool.semantic_release.branches.main]
+match = "main"
+prerelease = false
 
 

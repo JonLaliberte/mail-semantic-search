@@ -160,6 +160,20 @@ class VectorStore:
         except chromadb.errors.ChromaError as e:
             logger.debug(f"ChromaDB delete failed for {file_path}: {e}")
 
+    def delete_emails(self, file_paths: List[str]) -> None:
+        """Remove the Chroma documents for a batch of file paths.
+
+        Deleting IDs that are not present is a no-op in Chroma, so this is
+        safe even when the vector store is already in sync with disk.
+        """
+        if not file_paths:
+            return
+        ids = [self._get_file_hash(fp) for fp in file_paths]
+        try:
+            self.collection.delete(ids=ids)
+        except chromadb.errors.ChromaError as e:
+            logger.debug(f"ChromaDB batch delete failed ({len(ids)} ids): {e}")
+
     def search(
         self, query_embedding: List[float], n_results: int = 10
     ) -> List[Dict]:

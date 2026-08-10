@@ -98,6 +98,8 @@ Normal CLI output stays in the terminal. Internal warnings, diagnostics, and tra
 
 ## Releases
 
+Versioning is automatic: every merge to `main` with a [Conventional Commit](https://www.conventionalcommits.org/) title is analyzed by [python-semantic-release](https://python-semantic-release.readthedocs.io/), which computes the next semantic version, tags it `vX.Y.Z`, and publishes a GitHub Release plus the Docker image below — no manual version bumps. (Maintainer/agent details live in `AGENTS.md`.)
+
 Tagged releases are published as multi-arch (amd64 + arm64) Docker images to GitHub Container Registry:
 
 ```
@@ -144,6 +146,8 @@ Incremental behavior (`index --incremental`):
 - `status`: Show indexing status and statistics
 
 - `dedup`: Remove duplicate index entries that share the same `Message-ID`, keeping the most recently indexed copy. Run `--dry-run` first to preview.
+
+- `prune`: Remove index entries whose backing `.eml` file no longer exists on disk. The SQLite table never drops vanished files on its own, so over time it accumulates orphaned rows for emails deleted or moved in MailMate, drifting above the ChromaDB count. `prune` scans the mail directory once and deletes the orphaned rows (and their ChromaDB vectors), reconciling the two counts. Aborts if the mail directory is missing or the scan finds zero files (so an unmounted drive can't wipe the index). Run `--dry-run` first to preview; `--batch-size N` controls the delete-commit batch (default 1000). Idempotent.
 
 - `reextract`: Re-parse and re-embed already-indexed emails using the current extractor. Use after bumping `CURRENT_EXTRACTION_VERSION` in `mailmate_reader.py` (see AGENTS.md). Two modes:
   - **Single-email** (visual QA, prints before/after `body_preview` diff):
@@ -410,7 +414,7 @@ The system will automatically download the new model into `MODEL_CACHE_DIR` on t
 - Use `--no-skip` when you want a full rebuild across all files
 
 **Indexing fails with `Cannot send a request, as the client has been closed`:**
-- This came from Hugging Face being revalidated over the network on every model load. Models are now loaded from `MODEL_CACHE_DIR` first, so a cached model never touches the network; upgrade to 0.8.2 or later.
+- Fixed after v0.9.0. Model files used to be revalidated against Hugging Face on every load, so a Hub outage could hang indexing for minutes and then kill it with this error. Models are now loaded from `MODEL_CACHE_DIR` first, so a cached model never touches the network — upgrade to the latest release.
 - The very first run still downloads the embedding and reranker models, so it needs working connectivity to `huggingface.co`.
 
 **Warnings/errors while indexing:**
