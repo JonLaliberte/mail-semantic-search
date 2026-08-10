@@ -127,6 +127,14 @@ As of v0.5.0, the docker-compose mount layout is `${EMAIL_DIR}:${EMAIL_DIR}:ro` 
 
 If you ever introduce a code path that resolves symlinks or otherwise canonicalizes paths, do it consistently in *both* `scan_eml_files` and `index_email_file`, or you'll get duplicate rows under different prefixes (caught and migrated by `migrate-paths`, but ugly).
 
+## Model loading is local-cache-first
+
+`load_model_local_first` in `model_loader.py` wraps every `SentenceTransformer` / `CrossEncoder` construction: it loads with `local_files_only=True` first and only falls back to a network-allowed load when the model isn't cached. Don't call the loaders directly — pass them through the helper.
+
+Without it, sentence-transformers revalidates every model file against `huggingface.co` on *each* load, which makes routine indexing depend on the Hub. That is not just slow: `huggingface_hub` 1.7.1's `_http_backoff_base` captures `client = get_session()` once, then calls `close_session()` on `httpx.ConnectError` and retries with that same closed client, so a transient SSL blip surfaces as `RuntimeError: Cannot send a request, as the client has been closed.` and kills the whole run. Observed in the wild 2026-08-10: three consecutive scheduled runs died this way after 5-minute hangs. Re-check whether the upstream bug is fixed before relaxing this.
+
+Note that the `os.environ["HF_HOME"] = cache_dir` assignments in `embedding_service.py` / `reranker.py` are effectively no-ops — `huggingface_hub` resolves that at import time, which has already happened. The cache location works because `cache_folder=` is passed explicitly. Don't rely on those env assignments.
+
 ## macOS find quirks
 
 `find` does **not** follow top-level symbolic links by default. When `EMAIL_DIR` is a symlink (a common setup for users keeping the maildir on an external SSD), a bare `find` returns zero results and the indexer silently advances the watermark, never indexing anything. Docker bind-mounts resolve the symlink at mount time, masking the bug there.
