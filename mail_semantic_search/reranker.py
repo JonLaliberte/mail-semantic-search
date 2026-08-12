@@ -8,6 +8,7 @@ from typing import Dict, List
 from sentence_transformers import CrossEncoder
 
 from mail_semantic_search.config import config
+from mail_semantic_search.model_loader import load_model_local_first
 from mail_semantic_search.runtime_logging import (
     LoggerWriter,
     configure_logging,
@@ -28,7 +29,8 @@ class CrossEncoderReranker:
         with ExitStack() as stack:
             stack.enter_context(redirect_stdout(LoggerWriter(logger, logging.WARNING)))
             stack.enter_context(redirect_stderr_to_logger(logger, logging.WARNING))
-            self.model = CrossEncoder(
+            self.model = load_model_local_first(
+                CrossEncoder,
                 config.reranker_model,
                 cache_folder=cache_dir,
             )

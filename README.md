@@ -395,7 +395,7 @@ To switch embedding models:
 1. Update `EMBEDDING_MODEL` in `.env`
 2. Re-run indexing: `docker compose run --rm mail-semantic-search index --no-skip`
 
-The system will automatically download and use the new model.
+The system will automatically download the new model into `MODEL_CACHE_DIR` on the first run that needs it. After that, models load straight from that cache — no network round-trip to Hugging Face on subsequent runs, so indexing keeps working offline and is unaffected by Hub outages.
 
 ## Troubleshooting
 
@@ -412,6 +412,10 @@ The system will automatically download and use the new model.
 - The process can be interrupted and resumed
 - Already indexed emails are skipped on subsequent runs
 - Use `--no-skip` when you want a full rebuild across all files
+
+**Indexing fails with `Cannot send a request, as the client has been closed`:**
+- Fixed after v0.9.0. Model files used to be revalidated against Hugging Face on every load, so a Hub outage could hang indexing for minutes and then kill it with this error. Models are now loaded from `MODEL_CACHE_DIR` first, so a cached model never touches the network — upgrade to the latest release.
+- The very first run still downloads the embedding and reranker models, so it needs working connectivity to `huggingface.co`.
 
 **Warnings/errors while indexing:**
 - Progress bars and high-level status updates stay in the terminal
