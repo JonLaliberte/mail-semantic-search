@@ -1,5 +1,6 @@
 """Configuration management for mail-semantic-search."""
 
+import logging
 import os
 from pathlib import Path
 from typing import Optional
@@ -8,6 +9,8 @@ from dotenv import load_dotenv
 
 # Load environment variables from .env file
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 
 class Config:
@@ -43,6 +46,10 @@ class Config:
     DEFAULT_QUOTE_STRIP_MAX_LINES = 1500
     DEFAULT_LOG_MAX_BYTES = 10 * 1024 * 1024
     DEFAULT_LOG_BACKUP_COUNT = 5
+
+    # URL scheme used for the `markdown_link` field on email results.
+    VALID_LINK_SCHEMES = ("mid", "message")
+    DEFAULT_LINK_SCHEME = "mid"
 
     def __init__(self):
         # Embedding model configuration
@@ -80,6 +87,13 @@ class Config:
             os.path.expanduser("~/Documents/mailmate-staged"),
         )
         self.staging_dir = Path(staging_dir)
+
+        # Which URL scheme email results use for `markdown_link`. Apple Mail
+        # claims `message:` on macOS, so `mid:` routes to MailMate more
+        # reliably while Mail is still the registered default reader.
+        self.link_scheme: str = self._parse_link_scheme(
+            os.getenv("MAILMATE_LINK_SCHEME")
+        )
 
         # Runtime logging
         log_path = os.getenv("LOG_PATH", "./data/logs/mail-semantic-search.error.log")
@@ -224,6 +238,22 @@ class Config:
     def _parse_bool(value: str) -> bool:
         """Parse bool-like env strings safely."""
         return value.strip().lower() in {"1", "true", "yes", "on"}
+
+    @classmethod
+    def _parse_link_scheme(cls, value: Optional[str]) -> str:
+        """Normalize MAILMATE_LINK_SCHEME, warning (not raising) on garbage."""
+        if not value:
+            return cls.DEFAULT_LINK_SCHEME
+        scheme = value.strip().lower()
+        if scheme in cls.VALID_LINK_SCHEMES:
+            return scheme
+        logger.warning(
+            "Unknown MAILMATE_LINK_SCHEME=%r; falling back to %r. Valid values: %s",
+            value,
+            cls.DEFAULT_LINK_SCHEME,
+            ", ".join(cls.VALID_LINK_SCHEMES),
+        )
+        return cls.DEFAULT_LINK_SCHEME
 
     def __repr__(self) -> str:
         return (

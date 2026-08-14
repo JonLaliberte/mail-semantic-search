@@ -7,6 +7,7 @@ from typing import Dict, List, Optional, Tuple
 from mail_semantic_search.config import config
 from mail_semantic_search.database import Database, get_file_hash
 from mail_semantic_search.embedding_service import EmbeddingService
+from mail_semantic_search.links import attach_link_fields
 from mail_semantic_search.query_parser import LocalQueryParser
 from mail_semantic_search.query import QueryBuilder
 from mail_semantic_search.reranker import CrossEncoderReranker
@@ -276,7 +277,7 @@ def _normalize_result(result: Dict) -> Dict:
     normalized.setdefault("attachments", [])
     normalized.pop("from", None)
     normalized.pop("to", None)
-    return normalized
+    return attach_link_fields(normalized)
 
 
 def _dedup_results_by_message_id(results: List[Dict]) -> List[Dict]:
@@ -582,7 +583,9 @@ def list_inbox_emails_payload(request: InboxRequest) -> Dict:
             "date_after": request.date_after.isoformat() if request.date_after else None,
             "date_before": request.date_before.isoformat() if request.date_before else None,
         },
-        results=rows,
+        # Not run through _normalize_result — inbox rows intentionally keep
+        # their `from`/`to` key names, so only the link fields are added.
+        results=[attach_link_fields(row) for row in rows],
     )
     return asdict(response)
 

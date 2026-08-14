@@ -84,6 +84,7 @@ All configuration is done via the `.env` file:
 - `INCREMENTAL_OVERLAP_SECONDS`: Re-scan window subtracted from the incremental watermark to catch clock skew and odd file writes (default: `86400`)
 - `BODY_PREVIEW_LIMIT`: Max chars stored in `body_preview` (default: `5000`). The embedding text is independently capped by the model's context window (~2000 chars for BGE-base), so bumping this affects snippet display only.
 - `STAGING_DIR`: Where `stage_email_attachments` (MCP) / `stage` (CLI) copies an email's attachments + `.eml` for sandbox-accessible reads (default: `~/Documents/mailmate-staged`)
+- `MAILMATE_LINK_SCHEME`: URL scheme used for the `markdown_link` field on email results — `mid` (default) or `message`. Both `mid_url` and `message_url` are always emitted regardless; this only picks the target for the pre-built Markdown link. `mid` is the default because Apple Mail claims the `message:` scheme on macOS, so `mid:` routes to MailMate more reliably while Mail is still the registered default reader. Unrecognized values log a warning and fall back to `mid`.
 - `MCP_TRANSPORT`: `stdio` (default — spawned by client) or `http` (standalone HTTP server, see "MCP over HTTP" below)
 - `MCP_HOST`: HTTP bind address when `MCP_TRANSPORT=http` (default: `127.0.0.1`, loopback only)
 - `MCP_PORT`: HTTP port (default: `6543`)
@@ -188,6 +189,18 @@ Available MCP tools:
 - `stage_email_attachments`: copy an email's attachments + `.eml` to `STAGING_DIR` so a sandboxed client can `Read` the bytes (see `stage` CLI command above for the same operation)
 - `clear_staged_emails`: remove staged dirs (single via `short_hash` or all)
 - macOS only (when running on Darwin): `open_email`, `mark_email_read`, `archive_email`, `mark_read_and_archive`
+
+#### MailMate deep links on results
+
+Every result from `search_emails`, `query_emails`, and `list_inbox_emails` carries three ready-to-paste link fields alongside the untouched `message_id`:
+
+| Field | Example |
+|---|---|
+| `message_url` | `message:%3C3629dfddb56934c5cd1f155cdb23d84a@darwindesignllc.com%3E` |
+| `mid_url` | `mid:3629dfddb56934c5cd1f155cdb23d84a@darwindesignllc.com` |
+| `markdown_link` | `[BO Daily Status](mid:3629dfddb56934c5cd1f155cdb23d84a@darwindesignllc.com)` |
+
+All three are `null` when a result has no Message-ID. `message_url` is percent-encoded (a literal `%` in a Message-ID otherwise breaks the `message:` scheme); `mid_url` is left bare per [RFC 2392](https://datatracker.ietf.org/doc/html/rfc2392). `markdown_link` uses whichever scheme `MAILMATE_LINK_SCHEME` selects, strips `[`/`]` from the subject label, and falls back to the encoded `message:` target when the bare `mid:` form contains parens that would close the Markdown link early.
 
 ### Claude Desktop (macOS)
 
