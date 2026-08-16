@@ -223,7 +223,11 @@ def search(
 @click.option("--no-attachments", is_flag=True, help="Only show emails without attachments")
 @click.option("--attachment-type", help="Filter by attachment file extension (e.g., pdf, jpg)")
 @click.option("--attachment-name", help="Filter by attachment filename (partial match)")
-@click.option("--limit", type=int, help="Limit number of results")
+@click.option(
+    "--limit",
+    type=int,
+    help="Limit number of results (default and maximum: MAX_FILTERED_SEARCH_LIMIT)",
+)
 @click.option("--show-attachments", is_flag=True, help="Show attachment details")
 def query(
     from_addr: Optional[str],

@@ -183,7 +183,7 @@ mail-semantic-search-mcp
 
 Available MCP tools:
 - `search_emails`: semantic search with optional auto-filters and reranking
-- `query_emails`: metadata-only lookup
+- `query_emails`: metadata-only lookup, capped at `MAX_FILTERED_SEARCH_LIMIT` results (default 1000) so a broad query cannot pull the whole index into memory; the response reports the `limit` applied and a `truncated` flag when more emails matched (page by feeding the oldest result's `date` back as `date_before`)
 - `list_inbox_emails`: newest-first inbox listing with optional account / date-range pagination (caller pages by feeding the oldest result's `date` back as `date_before`)
 - `get_status`: index and configuration summary
 - `stage_email_attachments`: copy an email's attachments + `.eml` to `STAGING_DIR` so a sandboxed client can `Read` the bytes (see `stage` CLI command above for the same operation)

@@ -462,11 +462,27 @@ def search_email_records(request: SearchRequest) -> SearchResponse:
         )
 
 
+def _clamped_query_limit(requested: Optional[int]) -> int:
+    """Cap how many rows a single metadata query may materialize.
+
+    An unset limit used to mean "no LIMIT clause", so one no-argument
+    `query_emails()` pulled the whole 700k-row table into memory and copied it
+    several times on the way to JSON. Unset now means the cap, not everything.
+    """
+    cap = config.max_filtered_search_limit
+    if requested is None:
+        return cap
+    return max(1, min(requested, cap))
+
+
 def query_email_records(request: QueryRequest) -> QueryResponse:
     """Run metadata-only query and return structured results."""
+    limit = _clamped_query_limit(request.limit)
     with Database() as database:
         query_builder = QueryBuilder(database)
-        results = query_builder.build_query(
+        # One row past the limit, so "exactly `limit` matches" is
+        # distinguishable from "more than `limit`" without a second COUNT.
+        rows = query_builder.build_query(
             from_addr=request.from_addr,
             to_addr=request.to_addr,
             subject=request.subject,
@@ -476,11 +492,13 @@ def query_email_records(request: QueryRequest) -> QueryResponse:
             has_attachments=request.has_attachments,
             attachment_type=request.attachment_type,
             attachment_name=request.attachment_name,
-            limit=request.limit,
+            limit=limit + 1,
         )
     return QueryResponse(
         filters=_filters_from_query_request(request),
-        results=[_normalize_result(result) for result in results],
+        results=[_normalize_result(result) for result in rows[:limit]],
+        limit=limit,
+        truncated=len(rows) > limit,
     )
 
 

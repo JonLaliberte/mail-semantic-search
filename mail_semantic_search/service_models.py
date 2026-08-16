@@ -56,10 +56,16 @@ class SearchResponse:
 
 @dataclass
 class QueryResponse:
-    """Structured metadata query response."""
+    """Structured metadata query response.
+
+    `limit` is the row cap actually applied (which may be lower than the one
+    requested); `truncated` says whether more rows matched than were returned.
+    """
 
     filters: Dict[str, Any]
     results: List[Dict[str, Any]] = field(default_factory=list)
+    limit: Optional[int] = None
+    truncated: bool = False
 
 
 @dataclass

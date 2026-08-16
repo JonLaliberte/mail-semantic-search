@@ -119,7 +119,13 @@ def query_emails(
     attachment_name: Optional[str] = None,
     limit: Optional[int] = None,
 ) -> dict:
-    """Query emails using metadata filters only."""
+    """Query emails using metadata filters only.
+
+    Results are capped (see `limit` in the response for the cap actually
+    applied). If `truncated` is true more emails matched than were returned —
+    narrow the filters, or page backwards by passing the oldest returned date
+    as `date_before`.
+    """
     return query_email_records_payload(
         QueryRequest(
             from_addr=from_addr,
