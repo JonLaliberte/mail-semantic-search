@@ -89,10 +89,12 @@ class QueryBuilder:
         # Order by date descending
         query += " ORDER BY e.date DESC"
 
-        # Add limit
-        if limit:
-            query += " LIMIT ?"
-            params.append(limit)
+        # Add limit. An unset limit must never mean "no LIMIT": on a large
+        # index that fetchall()s the entire emails table into memory, which
+        # peaked at ~60 GB and wedged the MCP server. Unset means the cap.
+        effective_limit = limit if limit and limit > 0 else config.max_filtered_search_limit
+        query += " LIMIT ?"
+        params.append(effective_limit)
 
         # Execute query
         cursor.execute(query, params)
