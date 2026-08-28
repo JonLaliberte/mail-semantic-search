@@ -182,13 +182,20 @@ mail-semantic-search-mcp
 ```
 
 Available MCP tools:
-- `search_emails`: semantic search with optional auto-filters and reranking
-- `query_emails`: metadata-only lookup, capped at `MAX_FILTERED_SEARCH_LIMIT` results (default 1000) so a broad query cannot pull the whole index into memory; the response reports the `limit` applied and a `truncated` flag when more emails matched (page by feeding the oldest result's `date` back as `date_before`)
-- `list_inbox_emails`: newest-first inbox listing with optional account / date-range pagination (caller pages by feeding the oldest result's `date` back as `date_before`)
+- `search_emails`: meaning-based ranking with optional metadata filters, local query parsing, and cross-encoder reranking; use it when the request is about message content or concepts
+- `query_emails`: fast metadata-only lookup for sender, recipient, subject, date, and attachments, capped at `MAX_FILTERED_SEARCH_LIMIT` results (default 1000); the response reports the applied `limit` and whether results were `truncated`
+- `list_inbox_emails`: newest-first listing of messages whose indexed paths are currently in MailMate IMAP INBOX folders, with optional account and strict date-bound pagination
 - `get_status`: index and configuration summary
-- `stage_email_attachments`: copy an email's attachments + `.eml` to `STAGING_DIR` so a sandboxed client can `Read` the bytes (see `stage` CLI command above for the same operation)
-- `clear_staged_emails`: remove staged dirs (single via `short_hash` or all)
-- macOS only (when running on Darwin): `open_email`, `mark_email_read`, `archive_email`, `mark_read_and_archive`
+- `stage_email_attachments`: copy an email's attachments and optionally its `.eml` to `STAGING_DIR` so a sandboxed client can read the bytes (see `stage` CLI command above for the same operation)
+- `clear_staged_emails`: delete staged copies only—one via `short_hash`, or all when omitted; source emails and index data are never removed
+- macOS only (when running on Darwin): `open_email` performs a visible, read-only UI action; `mark_email_read`, `archive_email`, and `mark_read_and_archive` change message state
+
+Shared `search_emails` / `query_emails` filter semantics:
+
+- `from_addr`, `to_addr`, `subject_like`, and `attachment_name` are partial matches; `to_addr` covers To, CC, and BCC
+- `subject` and `attachment_type` are exact matches; attachment extensions may include a leading dot
+- metadata date bounds are inclusive and accept ISO-8601 dates or timestamps
+- filters in one call are combined with AND; for “to or from” searches, make two calls and deduplicate by `message_id`
 
 #### MailMate deep links on results
 
@@ -444,4 +451,3 @@ The system will automatically download the new model into `MODEL_CACHE_DIR` on t
 ## License
 
 MIT
-

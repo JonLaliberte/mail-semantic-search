@@ -85,7 +85,35 @@ def search_emails(
     auto_filters: Optional[bool] = None,
     rerank: Optional[bool] = None,
 ) -> dict:
-    """Search emails using semantic retrieval with optional metadata filters."""
+    """Rank indexed emails by semantic similarity, with optional metadata filters.
+
+    Use this tool for concepts, topics, or wording that may not appear verbatim
+    in a message. For sender, recipient, subject, date, or attachment lookup
+    without a content-ranking question, use `query_emails` instead; it is
+    faster and does not load the embedding or reranking models.
+
+    All explicit filters are combined with AND. To find messages sent to OR
+    from one address, call the appropriate tool twice and deduplicate the
+    combined results by `message_id`. The response includes the effective
+    query, applied filters, parser/reranker flags, and similarity-ranked
+    results with message links, metadata, body previews, and attachments.
+
+    Args:
+        query: Natural-language description of the email content to find.
+        from_addr: Case-insensitive partial match against the sender name or address.
+        to_addr: Case-insensitive partial match across To, CC, and BCC recipients.
+        subject: Exact match against the complete stored subject.
+        subject_like: Case-insensitive partial match within the subject.
+        date_after: Inclusive lower date bound as an ISO-8601 date or timestamp.
+        date_before: Inclusive upper date bound as an ISO-8601 date or timestamp.
+        has_attachments: Set true to require at least one attachment.
+        no_attachments: Set true to require no attachments; mutually exclusive with has_attachments.
+        attachment_type: Exact file extension, with or without a leading dot, such as `pdf` or `.jpg`.
+        attachment_name: Case-insensitive partial match within attachment filenames.
+        limit: Maximum number of final ranked results; defaults to the configured search result count.
+        auto_filters: True enables natural-language query rewriting and filter extraction; false disables it; null uses configuration.
+        rerank: True enables local cross-encoder reranking; false keeps vector ranking; null uses configuration.
+    """
     return search_email_records_payload(
         SearchRequest(
             query=query,
@@ -119,12 +147,32 @@ def query_emails(
     attachment_name: Optional[str] = None,
     limit: Optional[int] = None,
 ) -> dict:
-    """Query emails using metadata filters only.
+    """List indexed emails matching metadata filters, newest first.
+
+    Use this tool when sender, recipient, subject, date, or attachment metadata
+    answers the request. Use `search_emails` instead when results must be ranked
+    by the meaning of their content. All supplied filters are combined with
+    AND. To find messages sent to OR from one address, call this tool twice and
+    deduplicate the combined results by `message_id`.
 
     Results are capped (see `limit` in the response for the cap actually
     applied). If `truncated` is true more emails matched than were returned —
-    narrow the filters, or page backwards by passing the oldest returned date
-    as `date_before`.
+    narrow the filters or continue with an earlier `date_before`. Results
+    include message links, metadata, body previews, file paths, and attachment
+    details; this tool does not read attachment bytes.
+
+    Args:
+        from_addr: Case-insensitive partial match against the sender name or address.
+        to_addr: Case-insensitive partial match across To, CC, and BCC recipients.
+        subject: Exact match against the complete stored subject.
+        subject_like: Case-insensitive partial match within the subject.
+        date_after: Inclusive lower date bound as an ISO-8601 date or timestamp.
+        date_before: Inclusive upper date bound as an ISO-8601 date or timestamp.
+        has_attachments: Set true to require at least one attachment.
+        no_attachments: Set true to require no attachments; mutually exclusive with has_attachments.
+        attachment_type: Exact file extension, with or without a leading dot, such as `pdf` or `.jpg`.
+        attachment_name: Case-insensitive partial match within attachment filenames.
+        limit: Maximum rows to return; null uses MAX_FILTERED_SEARCH_LIMIT and larger values are capped there.
     """
     return query_email_records_payload(
         QueryRequest(
@@ -144,7 +192,12 @@ def query_emails(
 
 @mcp.tool
 def get_status() -> dict:
-    """Return indexing status and configuration summary."""
+    """Check whether the email index is available and report its configuration.
+
+    Returns SQLite and vector-store email counts, attachment statistics, date
+    range, configured paths, embedding model, batch size, and default search
+    result count. This is read-only and does not scan or update email files.
+    """
     return get_status_data_payload()
 
 
@@ -155,7 +208,20 @@ def list_inbox_emails(
     date_after: Optional[str] = None,
     date_before: Optional[str] = None,
 ) -> dict:
-    """List emails currently in any IMAP INBOX, newest first."""
+    """List messages currently in MailMate IMAP INBOX folders, newest first.
+
+    Inbox membership is determined from the indexed file path, so archived or
+    moved messages are excluded. This is a metadata listing, not semantic
+    search. Results include a short body snippet and message links. For paging,
+    pass the oldest result's date as `date_before`; inbox date bounds are strict
+    so that boundary message is not repeated.
+
+    Args:
+        limit: Number of messages to return; defaults to 50 and is clamped to 1-500.
+        account: Optional bare account email address, such as `user@example.com`; null includes every indexed account.
+        date_after: Exclusive lower date bound as an ISO-8601 date or timestamp.
+        date_before: Exclusive upper date bound as an ISO-8601 date or timestamp.
+    """
     return list_inbox_emails_payload(
         InboxRequest(
             limit=limit,
@@ -172,16 +238,23 @@ def stage_email_attachments(
     file_path: Optional[str] = None,
     include_eml: bool = True,
 ) -> dict:
-    """Copy an indexed email's attachments + .eml to a sandbox-accessible dir.
+    """Copy an indexed email's attachment bytes to a sandbox-accessible directory.
 
-    Use when you need to actually READ an attachment's bytes (e.g. a PDF
-    invoice, an image, a docx). The source .eml often lives on an external
+    Use after finding a message when attachment metadata is insufficient and
+    the actual PDF, image, document, or other bytes must be read. The source
+    `.eml` often lives on an external
     volume the MCP client cannot access; this stages a per-email copy under
     ~/Documents/mailmate-staged/<hash>/ where Read tools can reach it.
 
     Pass either message_id (with or without angle brackets) or file_path.
     Idempotent — same email always stages to the same dir; calling again
-    refreshes the contents.
+    refreshes the contents. The response contains absolute staged paths for the
+    `.eml` and each extracted attachment; it does not return attachment bytes.
+
+    Args:
+        message_id: RFC-822 Message-ID from a search result, with or without angle brackets; provide this or file_path.
+        file_path: Exact indexed source `.eml` path from a search result; provide this or message_id.
+        include_eml: Also copy the complete source message as `message.eml`; attachments are always extracted.
     """
     if not message_id and not file_path:
         return {"status": "failed", "message": "Pass message_id or file_path"}
@@ -190,9 +263,14 @@ def stage_email_attachments(
 
 @mcp.tool
 def clear_staged_emails(short_hash: Optional[str] = None) -> dict:
-    """Remove staged email dirs created by stage_email_attachments.
+    """Delete temporary copies created by `stage_email_attachments`.
 
-    Pass short_hash to remove a single staged email; omit to clear all.
+    This removes only staged copies, never source emails or the search index.
+    Pass a `short_hash` to remove one staged message. Omitting it deletes every
+    staged message directory under the configured staging root.
+
+    Args:
+        short_hash: Twelve-character staged directory name; null clears all staged message directories.
     """
     return clear_staged(short_hash=short_hash)
 
@@ -209,22 +287,50 @@ if platform.system() == "Darwin":
 
     @mcp.tool
     def open_email(message_id: str) -> dict:
-        """Open the given email in MailMate. Accepts the RFC-822 Message-ID with or without angle brackets."""
+        """Open one indexed message in MailMate and bring the app to the foreground.
+
+        This causes a visible UI action but does not modify the message.
+
+        Args:
+            message_id: RFC-822 Message-ID from a search result, with or without angle brackets.
+        """
         return _open_email(message_id)
 
     @mcp.tool
     def mark_email_read(message_id: str) -> dict:
-        """Mark the given email as read in MailMate (sets the IMAP \\Seen flag)."""
+        """Mark one message as read in MailMate by setting its IMAP \\Seen flag.
+
+        This is a state-changing action. Use it only when the user asks to
+        change the message's read state.
+
+        Args:
+            message_id: RFC-822 Message-ID from a search result, with or without angle brackets.
+        """
         return _mark_email_read(message_id)
 
     @mcp.tool
     def archive_email(message_id: str) -> dict:
-        """Archive the given email in MailMate (invokes MailMate's archive: action)."""
+        """Archive one message using MailMate's configured archive action.
+
+        This is a state-changing action that can move the message out of its
+        current mailbox. Use it only when the user asks to archive that message.
+
+        Args:
+            message_id: RFC-822 Message-ID from a search result, with or without angle brackets.
+        """
         return _archive_email(message_id)
 
     @mcp.tool
     def mark_read_and_archive(message_id: str) -> dict:
-        """Mark as read AND archive in a single MailMate round-trip — use when finishing triage of one email."""
+        """Mark one message read and archive it in a single MailMate action.
+
+        This is a state-changing action that performs both operations. Use it
+        only when the user asks to finish triage by marking that message read
+        and archiving it.
+
+        Args:
+            message_id: RFC-822 Message-ID from a search result, with or without angle brackets.
+        """
         return _mark_read_and_archive(message_id)
 
 
