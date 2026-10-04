@@ -10,7 +10,7 @@ import click
 
 from mail_semantic_search.database import Database, get_file_hash
 from mail_semantic_search.index import index_email_file, index_emails
-from mail_semantic_search.vector_store import VectorStore
+from mail_semantic_search.vector_store import VectorStore, vacuum_chroma_sqlite
 from mail_semantic_search.runtime_logging import (
     configure_logging,
     configure_runtime_diagnostics,
@@ -697,6 +697,70 @@ def migrate_paths(old_prefix: str, new_prefix: str, batch_size: int, dry_run: bo
         handle_error(f"Database error: {e}", log_exception=True)
     except (OSError, RuntimeError, ValueError, TypeError) as e:
         handle_error(f"Migration failed: {e}", log_exception=True)
+
+
+@main.command("compact-vectors")
+@click.option("--batch-size", type=int, default=1000, help="Vectors copied per batch (default: 1000)")
+@click.option("--dry-run", is_flag=True, help="Report index size and expected savings without rewriting")
+def compact_vectors(batch_size: int, dry_run: bool):
+    """Rebuild the vector index to reclaim memory held by deleted vectors.
+
+    ChromaDB's index is loaded fully into RAM and never reuses the slots of
+    deleted vectors, so `migrate-paths`, `prune`, and `dedup` leave it carrying
+    dead entries — after a full path migration, half the index. This copies the
+    live vectors into a fresh collection and swaps it in. Embeddings are reused
+    (no re-embed cost).
+
+    Stop the MCP server first and back up the data directory; restart the
+    server afterwards. Safe to re-run if interrupted.
+    """
+    try:
+        with Database() as database, VectorStore() as vector_store:
+            live = vector_store.get_stats()["total_emails"]
+            before = vector_store.index_bytes_on_disk()
+            click.echo(
+                f"{live} live vectors; index is {before / 1e9:.2f} GB on disk (and in RAM when loaded)."
+            )
+            if dry_run:
+                sample = vector_store.collection.peek(1)["embeddings"]
+                if len(sample):
+                    # hnswlib stores each element as its float32 vector plus
+                    # ~140 bytes of level-0 links and label at the default M=16.
+                    expected = live * (len(sample[0]) * 4 + 140)
+                    click.echo(
+                        f"Dry run: compacting would leave about {expected / 1e9:.2f} GB."
+                    )
+                return
+            if live == 0:
+                click.echo("Nothing to compact.")
+                return
+
+            database.acquire_backfill_lock()
+            try:
+                last_reported = [0]
+
+                def progress(done: int, total: int) -> None:
+                    if done == total or done - last_reported[0] >= 20000:
+                        last_reported[0] = done
+                        click.echo(f"  Copied {done}/{total}")
+
+                count = vector_store.compact(batch_size=batch_size, progress=progress)
+            finally:
+                database.release_backfill_lock()
+
+        # Both steps below need every handle on the store closed first.
+        click.echo("Reclaiming disk space...")
+        vacuum_chroma_sqlite(vector_store.chromadb_path)
+        with VectorStore() as vector_store:
+            after = vector_store.index_bytes_on_disk()
+        click.echo(
+            f"Done. {count} vectors; index is now {after / 1e9:.2f} GB "
+            f"(was {before / 1e9:.2f} GB)."
+        )
+    except sqlite3.Error as e:
+        handle_error(f"Database error: {e}", log_exception=True)
+    except (OSError, RuntimeError, ValueError, TypeError) as e:
+        handle_error(f"Compaction failed: {e}", log_exception=True)
 
 
 if __name__ == "__main__":

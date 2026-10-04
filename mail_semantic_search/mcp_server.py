@@ -15,6 +15,10 @@ letting it spawn the process. Defaults:
     MCP_HOST       bind address       (default: 127.0.0.1, loopback only)
     MCP_PORT       TCP port           (default: 6543)
     MCP_PATH       URL path           (default: /mcp)
+
+The vector index and models are held in memory between tool calls and released
+after MCP_IDLE_UNLOAD_SECONDS without one (default: 600; 0 keeps them loaded
+forever). The first call after a release reloads them.
 """
 
 import logging
@@ -25,7 +29,9 @@ from datetime import datetime
 from typing import Optional
 
 from fastmcp import FastMCP
+from fastmcp.server.middleware import Middleware
 
+from mail_semantic_search import resources
 from mail_semantic_search.config import config
 from mail_semantic_search.runtime_logging import (
     configure_logging,
@@ -43,6 +49,17 @@ from mail_semantic_search.staging import clear_staged, stage_email
 logger = logging.getLogger(__name__)
 
 mcp = FastMCP(name="Mail Semantic Search")
+
+
+class _ResourceUseMiddleware(Middleware):
+    """Keep the index and models loaded while any tool call is in flight."""
+
+    async def on_call_tool(self, context, call_next):
+        with resources.in_use():
+            return await call_next(context)
+
+
+mcp.add_middleware(_ResourceUseMiddleware())
 
 
 def _parse_mcp_date(date_str: Optional[str]) -> Optional[datetime]:
@@ -358,6 +375,15 @@ def _resolve_transport() -> tuple[str, dict]:
     return transport, {"host": host, "port": port, "path": path}
 
 
+def _idle_unload_seconds() -> float:
+    """Read MCP_IDLE_UNLOAD_SECONDS; 0 (or negative) disables idle release."""
+    raw = os.getenv("MCP_IDLE_UNLOAD_SECONDS", "600")
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        raise SystemExit(f"MCP_IDLE_UNLOAD_SECONDS must be a number, got {raw!r}.")
+
+
 def _log_startup_status_async() -> None:
     """Best-effort: fetch the index status on a daemon thread.
 
@@ -406,6 +432,7 @@ def main() -> None:
     )
 
     transport, kwargs = _resolve_transport()
+    idle_seconds = _idle_unload_seconds()
     if transport != "stdio":
         host = kwargs["host"]
         port = kwargs["port"]
@@ -419,6 +446,8 @@ def main() -> None:
         print(startup_msg, file=sys.stderr)
 
     _log_startup_status_async()
+    if idle_seconds:
+        resources.start_idle_reaper(idle_seconds)
     mcp.run(transport=transport, **kwargs)
 
 
