@@ -158,6 +158,16 @@ Without it, sentence-transformers revalidates every model file against `huggingf
 
 Note that the `os.environ["HF_HOME"] = cache_dir` assignments in `embedding_service.py` / `reranker.py` are effectively no-ops — `huggingface_hub` resolves that at import time, which has already happened. The cache location works because `cache_folder=` is passed explicitly. Don't rely on those env assignments.
 
+## Vector index memory
+
+Chroma's local HNSW index is loaded fully into RAM (`data_level0.bin` on disk ≈ footprint in memory) and only tombstones deletions — slots are never reused. Anything that deletes or re-IDs vectors grows it permanently: a full `migrate-paths` doubles it. `compact-vectors` (`VectorStore.compact`) is the only way back: copy live rows to `emails_compacting`, rename the original to `emails_retired`, promote, drop. Chroma's `delete_collection` leaves the old HNSW directory on disk, so `_finish_swap` removes segment directories no longer listed in `chroma.sqlite3`, and the CLI then `VACUUM`s that file (the copy doubles it). Each step is resumable; `VectorStore()` recreates an empty `emails` if opened mid-swap, which `_finish_swap` detects and removes.
+
+Chroma refcounts clients per persist path and frees the index when the last one closes, so `VectorStore.close()` must stay a real close. The MCP server keeps the index loaded between calls by holding one store open in `resources.py` (entered per tool call via middleware) and drops it, with the cached models, after `MCP_IDLE_UNLOAD_SECONDS`. Get models through `resources.get_embedding_service()` / `get_reranker()` on query paths rather than constructing them per call.
+
+Measured on 703k vectors (Apple Silicon, 2026-10-03): index 4.56 GB → 2.26 GB, ~25 min copy plus ~2 min vacuum, 6.4 GB peak RSS. The `chromadb` directory itself did not shrink (15 GB → 17 GB) because the rewritten full-text tables came out larger — the win is RAM, not disk.
+
+Don't expect model memory back on Apple Silicon: after dropping the models and calling `torch.mps.empty_cache()`, the MPS driver keeps most of what it allocated. The idle saving is the index.
+
 ## macOS find quirks
 
 `find` does **not** follow top-level symbolic links by default. When `EMAIL_DIR` is a symlink (a common setup for users keeping the maildir on an external SSD), a bare `find` returns zero results and the indexer silently advances the watermark, never indexing anything. Docker bind-mounts resolve the symlink at mount time, masking the bug there.

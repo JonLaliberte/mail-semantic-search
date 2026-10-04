@@ -89,6 +89,7 @@ All configuration is done via the `.env` file:
 - `MCP_HOST`: HTTP bind address when `MCP_TRANSPORT=http` (default: `127.0.0.1`, loopback only)
 - `MCP_PORT`: HTTP port (default: `6543`)
 - `MCP_PATH`: HTTP URL path (default: `/mcp`)
+- `MCP_IDLE_UNLOAD_SECONDS`: How long the MCP server keeps the vector index and models in memory after the last tool call (default: `600`). The index is held fully in RAM — several GB on a large mailbox — so a long-running server releases it once idle and reloads it on the next call (a few seconds). Set `0` to keep everything loaded permanently.
 - `LOG_PATH`: Runtime log file for internal warnings/errors/diagnostics (default: `./data/logs/mail-semantic-search.error.log`)
 - `LOG_LEVEL`: App log verbosity written to `LOG_PATH` (default: `INFO`)
 - `LOG_THIRD_PARTY_LEVEL`: Third-party library log verbosity written to `LOG_PATH` (default: `WARNING`)
@@ -149,6 +150,8 @@ Incremental behavior (`index --incremental`):
 - `dedup`: Remove duplicate index entries that share the same `Message-ID`, keeping the most recently indexed copy. Run `--dry-run` first to preview.
 
 - `prune`: Remove index entries whose backing `.eml` file no longer exists on disk. The SQLite table never drops vanished files on its own, so over time it accumulates orphaned rows for emails deleted or moved in MailMate, drifting above the ChromaDB count. `prune` scans the mail directory once and deletes the orphaned rows (and their ChromaDB vectors), reconciling the two counts. Aborts if the mail directory is missing or the scan finds zero files (so an unmounted drive can't wipe the index). Run `--dry-run` first to preview; `--batch-size N` controls the delete-commit batch (default 1000). Idempotent.
+
+- `compact-vectors`: Rebuild the vector index to reclaim memory. ChromaDB loads its index fully into RAM and never reuses the slots of deleted vectors, so `migrate-paths`, `prune`, and `dedup` leave dead entries behind — after a full path migration, half the index. This copies the live vectors into a fresh collection and swaps it in, reusing the existing embeddings. Run `--dry-run` first to see the current size and the expected size afterwards. Before the real run, stop the MCP server and back up the data directory; restart the server afterwards. Needs free disk of about twice the current `chromadb` directory while it runs; it finishes by deleting the old index and vacuuming Chroma's SQLite file. Concurrent `index` runs skip cleanly while it holds the index lock, and an interrupted run resumes when re-run. `--batch-size N` sets vectors copied per batch (default 1000).
 
 - `reextract`: Re-parse and re-embed already-indexed emails using the current extractor. Use after bumping `CURRENT_EXTRACTION_VERSION` in `mailmate_reader.py` (see AGENTS.md). Two modes:
   - **Single-email** (visual QA, prints before/after `body_preview` diff):
@@ -426,6 +429,10 @@ The system will automatically download the new model into `MODEL_CACHE_DIR` on t
 **Out of memory:**
 - Reduce `BATCH_SIZE` in `.env`
 - Use a smaller model like `BGE-small-en-v1.5`
+
+**MCP server uses several GB of memory:**
+- That is the vector index, which ChromaDB holds entirely in RAM while loaded. The server releases it after `MCP_IDLE_UNLOAD_SECONDS` (default 10 minutes) without a tool call.
+- If `compact-vectors --dry-run` reports an index much larger than its expected size, run `compact-vectors` to drop the dead vectors.
 
 **Slow indexing:**
 - This is normal for large collections (several hours for 35GB)

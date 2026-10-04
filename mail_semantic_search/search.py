@@ -6,11 +6,10 @@ from typing import Dict, List, Optional, Tuple
 
 from mail_semantic_search.config import config
 from mail_semantic_search.database import Database, get_file_hash
-from mail_semantic_search.embedding_service import EmbeddingService
 from mail_semantic_search.links import attach_link_fields
 from mail_semantic_search.query_parser import LocalQueryParser
 from mail_semantic_search.query import QueryBuilder
-from mail_semantic_search.reranker import CrossEncoderReranker
+from mail_semantic_search.resources import get_embedding_service, get_reranker
 from mail_semantic_search.service_models import (
     InboxRequest,
     InboxResponse,
@@ -323,7 +322,7 @@ def search_email_records(request: SearchRequest) -> SearchResponse:
     )
 
     with Database() as database, VectorStore() as vector_store:
-        embedding_service = EmbeddingService()
+        embedding_service = get_embedding_service()
         query_builder = QueryBuilder(database)
 
         vector_stats = vector_store.get_stats()
@@ -441,7 +440,7 @@ def search_email_records(request: SearchRequest) -> SearchResponse:
 
         rerank_applied = False
         if rerank_enabled and results:
-            results = CrossEncoderReranker().rerank(
+            results = get_reranker().rerank(
                 effective_query,
                 results,
                 top_k=final_result_count,

@@ -234,7 +234,7 @@ def test_search_emails_results_carry_link_fields(monkeypatch, seeded_db):
             return [0.0]
 
     monkeypatch.setattr(search_module, "VectorStore", _FakeVectorStore)
-    monkeypatch.setattr(search_module, "EmbeddingService", _FakeEmbeddingService)
+    monkeypatch.setattr(search_module, "get_embedding_service", _FakeEmbeddingService)
 
     from mail_semantic_search import mcp_server
 
@@ -269,7 +269,7 @@ def test_results_without_message_id_get_null_link_fields(monkeypatch, seeded_db)
             return [0.0]
 
     monkeypatch.setattr(search_module, "VectorStore", _FakeVectorStore)
-    monkeypatch.setattr(search_module, "EmbeddingService", _FakeEmbeddingService)
+    monkeypatch.setattr(search_module, "get_embedding_service", _FakeEmbeddingService)
 
     from mail_semantic_search import mcp_server
 

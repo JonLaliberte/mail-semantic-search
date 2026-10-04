@@ -1,8 +1,10 @@
 """Vector database operations using ChromaDB."""
 
 import logging
+import shutil
+import sqlite3
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 import chromadb
 from chromadb.config import Settings
@@ -11,6 +13,25 @@ from mail_semantic_search.config import config
 from mail_semantic_search.database import get_file_hash
 
 logger = logging.getLogger(__name__)
+
+COLLECTION_NAME = "emails"
+# Scratch names used only while `VectorStore.compact` is rebuilding the index.
+_COMPACTING_NAME = "emails_compacting"
+_RETIRED_NAME = "emails_retired"
+
+
+def vacuum_chroma_sqlite(chromadb_path: Path) -> None:
+    """Shrink Chroma's SQLite file after rows were dropped.
+
+    Compaction writes a second copy of every document and its full-text index
+    before dropping the first, which leaves the file at twice its live size.
+    Call with no store open on the path.
+    """
+    conn = sqlite3.connect(str(Path(chromadb_path) / "chroma.sqlite3"))
+    try:
+        conn.execute("VACUUM")
+    finally:
+        conn.close()
 
 
 class VectorStore:
@@ -24,7 +45,7 @@ class VectorStore:
             settings=Settings(anonymized_telemetry=False),
         )
         self.collection = self.client.get_or_create_collection(
-            name="emails",
+            name=COLLECTION_NAME,
             metadata={"hnsw:space": "cosine"},
         )
 
@@ -224,11 +245,130 @@ class VectorStore:
         count = self.collection.count()
         return {"total_emails": count}
 
+    def index_bytes_on_disk(self) -> int:
+        """Total size of the HNSW vector files, which Chroma loads fully into RAM."""
+        return sum(
+            f.stat().st_size for f in Path(self.chromadb_path).glob("*/data_level0.bin")
+        )
+
+    def compact(
+        self,
+        batch_size: int = 1000,
+        progress: Optional[Callable[[int, int], None]] = None,
+    ) -> int:
+        """Rebuild the collection so deleted vectors stop occupying the index.
+
+        Chroma's local HNSW index only tombstones deletions — the slots are
+        never reused — and the whole index is held in RAM, so a store that has
+        been through `migrate-paths` or heavy pruning carries every dead vector
+        in memory forever. Copying the live rows into a fresh collection and
+        swapping it in is the only way to get that space back. Embeddings are
+        reused; nothing is re-embedded.
+
+        Resumable: an interrupted copy continues where it stopped, and an
+        interrupted swap is finished on the next call. Returns the number of
+        vectors in the rebuilt collection.
+        """
+        names = {c.name for c in self.client.list_collections()}
+        if _RETIRED_NAME in names and _COMPACTING_NAME in names:
+            # Died between the two renames of a previous swap.
+            return self._finish_swap()
+        if _RETIRED_NAME in names:
+            # Died after the swap but before dropping the old collection.
+            self.client.delete_collection(_RETIRED_NAME)
+            names.discard(_RETIRED_NAME)
+
+        source = self.collection
+        target = self.client.get_or_create_collection(
+            name=_COMPACTING_NAME, metadata=source.metadata
+        )
+        resuming = target.count() > 0
+        batch_size = min(batch_size, self.client.get_max_batch_size())
+
+        ids = source.get(include=[])["ids"]
+        total = len(ids)
+        for start in range(0, total, batch_size):
+            batch_ids = ids[start : start + batch_size]
+            if resuming:
+                copied = set(target.get(ids=batch_ids, include=[])["ids"])
+                batch_ids = [i for i in batch_ids if i not in copied]
+            if batch_ids:
+                rows = source.get(
+                    ids=batch_ids, include=["embeddings", "metadatas", "documents"]
+                )
+                target.upsert(
+                    ids=rows["ids"],
+                    embeddings=rows["embeddings"],
+                    metadatas=rows["metadatas"],
+                    documents=rows["documents"],
+                )
+            if progress:
+                progress(min(start + batch_size, total), total)
+
+        copied_count, source_count = target.count(), source.count()
+        if copied_count != source_count:
+            raise RuntimeError(
+                f"Compacted collection has {copied_count} vectors but the original "
+                f"has {source_count}; leaving the original in place. Was the index "
+                "written to during compaction? Re-run to retry."
+            )
+
+        source.modify(name=_RETIRED_NAME)
+        return self._finish_swap()
+
+    def _finish_swap(self) -> int:
+        """Promote the rebuilt collection and drop the retired one."""
+        names = {c.name for c in self.client.list_collections()}
+        if COLLECTION_NAME in names:
+            # Anything that opened the store mid-swap (this constructor
+            # included) recreated an empty collection under the real name.
+            stray = self.client.get_collection(COLLECTION_NAME)
+            if stray.count() > 0:
+                raise RuntimeError(
+                    f"Cannot finish compaction: a non-empty {COLLECTION_NAME!r} "
+                    f"collection exists alongside {_COMPACTING_NAME!r}."
+                )
+            self.client.delete_collection(COLLECTION_NAME)
+        target = self.client.get_collection(_COMPACTING_NAME)
+        target.modify(name=COLLECTION_NAME)
+        self.client.delete_collection(_RETIRED_NAME)
+        self.collection = target
+        self._remove_orphaned_segment_dirs()
+        return target.count()
+
+    def _remove_orphaned_segment_dirs(self) -> None:
+        """Delete HNSW directories Chroma left behind for dropped collections.
+
+        `delete_collection` removes the segment's rows but not its directory,
+        so without this the retired index stays on disk at full size.
+        """
+        root = Path(self.chromadb_path)
+        try:
+            conn = sqlite3.connect(f"file:{root / 'chroma.sqlite3'}?mode=ro", uri=True)
+            try:
+                live = {row[0] for row in conn.execute("SELECT id FROM segments")}
+            finally:
+                conn.close()
+        except sqlite3.Error as e:
+            logger.warning("Skipping orphaned segment cleanup: %s", e)
+            return
+        if not live:
+            return
+        for header in root.glob("*/header.bin"):
+            if header.parent.name not in live:
+                shutil.rmtree(header.parent, ignore_errors=True)
+
     def close(self) -> None:
-        """Close the vector store connection."""
-        # ChromaDB PersistentClient handles cleanup automatically,
-        # but we provide this method for consistency
-        pass
+        """Drop this handle on the Chroma client.
+
+        Chroma shares one system per path and refcounts its clients; when the
+        last one closes, the in-memory HNSW index is freed. Callers that want
+        the index to stay loaded between uses hold a store open themselves
+        (see `resources`).
+        """
+        close = getattr(self.client, "close", None)  # absent before chromadb 1.x
+        if close is not None:
+            close()
 
     def __enter__(self):
         """Context manager entry."""
