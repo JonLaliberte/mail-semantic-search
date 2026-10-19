@@ -558,7 +558,7 @@ def clear_staged_cmd(short_hash: Optional[str]):
 
 @main.command("migrate-paths")
 @click.option("--old-prefix", required=True, help="Path prefix to rewrite (e.g. /emails/)")
-@click.option("--new-prefix", required=True, help="Replacement prefix (e.g. /Volumes/External Storage SSD/MailMate/Messages/)")
+@click.option("--new-prefix", required=True, help="Replacement prefix (e.g. /Volumes/External SSD/MailMate/Messages/)")
 @click.option("--batch-size", type=int, default=500, help="Rows per Chroma batch")
 @click.option("--dry-run", is_flag=True, help="Show what would change without writing")
 def migrate_paths(old_prefix: str, new_prefix: str, batch_size: int, dry_run: bool):

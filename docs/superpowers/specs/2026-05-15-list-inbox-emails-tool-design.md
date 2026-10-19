@@ -13,7 +13,7 @@ MailMate stores messages on disk under paths like:
 .../MailMate/Messages/IMAP/<account-url-encoded>/[Gmail].mailbox/All Mail.mailbox/4.eml   ← archived
 ```
 
-The `INBOX.mailbox/` segment is the reliable inbox marker. Account is encoded in the path (e.g. `brainstormenterprises%40gmail.com@imap.gmail.com`).
+The `INBOX.mailbox/` segment is the reliable inbox marker. Account is encoded in the path (e.g. `me%40example.com@imap.example.com`).
 
 The DB's `body_preview` column is already populated at index time (truncated to `config.body_preview_limit`, default 2000 chars), so a shorter snippet is a simple substring.
 
@@ -30,7 +30,7 @@ def list_inbox_emails(
 ```
 
 - `limit` — default 50, hard cap 500.
-- `account` — optional. Accepts bare form (`"brainstormenterprises@gmail.com"`); implementation URL-encodes `@` → `%40` before matching the path. Omitted ⇒ all accounts.
+- `account` — optional. Accepts bare form (`"me@example.com"`); implementation URL-encodes `@` → `%40` before matching the path. Omitted ⇒ all accounts.
 - `date_after` / `date_before` — optional ISO date strings (`YYYY-MM-DD` or full ISO datetime). Bounds are strict: `date > date_after` and `date < date_before`. Strict `<` lets a caller page through history by feeding the oldest result's date back in as `date_before`.
 
 ## Per-row payload

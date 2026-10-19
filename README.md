@@ -206,9 +206,9 @@ Every result from `search_emails`, `query_emails`, and `list_inbox_emails` carri
 
 | Field | Example |
 |---|---|
-| `message_url` | `message:%3C3629dfddb56934c5cd1f155cdb23d84a@darwindesignllc.com%3E` |
-| `mid_url` | `mid:3629dfddb56934c5cd1f155cdb23d84a@darwindesignllc.com` |
-| `markdown_link` | `[BO Daily Status](mid:3629dfddb56934c5cd1f155cdb23d84a@darwindesignllc.com)` |
+| `message_url` | `message:%3C0123456789abcdef0123456789abcdef@example.com%3E` |
+| `mid_url` | `mid:0123456789abcdef0123456789abcdef@example.com` |
+| `markdown_link` | `[Weekly Status Report](mid:0123456789abcdef0123456789abcdef@example.com)` |
 
 All three are `null` when a result has no Message-ID. `message_url` is percent-encoded (a literal `%` in a Message-ID otherwise breaks the `message:` scheme); `mid_url` is left bare per [RFC 2392](https://datatracker.ietf.org/doc/html/rfc2392). `markdown_link` uses whichever scheme `MAILMATE_LINK_SCHEME` selects, strips `[`/`]` from the subject label, and falls back to the encoded `message:` target when the bare `mid:` form contains parens that would close the Markdown link early.
 

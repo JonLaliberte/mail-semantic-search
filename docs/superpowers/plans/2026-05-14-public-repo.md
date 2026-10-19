@@ -19,7 +19,7 @@
 
 Open `docker-compose.yml`. Change line 7 from:
 ```yaml
-      - "/Volumes/External Storage SSD/Docker/mailmate-search/data:/app/data"
+      - "/Volumes/External SSD/Docker/mailmate-search/data:/app/data"
 ```
 To:
 ```yaml

@@ -156,13 +156,13 @@ def test_real_national_grid_email_keeps_bill_amount():
     html = fixture.read_text()
     out = html_to_text(html)
 
-    assert "$255.40" in out, "bill amount was dropped by footer truncator"
-    assert "May 21, 2026" in out, "due date was dropped"
+    assert "$187.62" in out, "bill amount was dropped by footer truncator"
+    assert "June 15, 2026" in out, "due date was dropped"
     assert "Pay Now" in out, "Pay Now link was dropped"
     # The preamble "Click here to view in browser" used to trigger truncation
     # in v1 because the marker match wasn't line-anchored. The actual content
     # body must follow it.
-    assert out.index("$255.40") > out.index("view in browser"), (
+    assert out.index("$187.62") > out.index("view in browser"), (
         "bill amount must appear AFTER the preamble that v1 used to truncate at"
     )
 

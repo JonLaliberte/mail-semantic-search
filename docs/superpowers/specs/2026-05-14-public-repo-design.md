@@ -10,7 +10,7 @@
 
 ### 1. `docker-compose.yml` — replace hardcoded volume path
 
-**Problem:** The data volume is hardcoded to `/Volumes/External Storage SSD/Docker/mailmate-search/data:/app/data`, which is specific to the author's machine and will silently break for anyone else.
+**Problem:** The data volume is hardcoded to `/Volumes/External SSD/Docker/mailmate-search/data:/app/data`, which is specific to the author's machine and will silently break for anyone else.
 
 **Fix:** Replace with an env-var-backed default:
 

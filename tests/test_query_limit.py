@@ -17,7 +17,7 @@ from mail_semantic_search.search import query_email_records
 from mail_semantic_search.service_models import QueryRequest
 
 
-PREFIX = "/Volumes/External Storage SSD/MailMate/Messages/IMAP/acct/Archive.mailbox"
+PREFIX = "/Volumes/External SSD/MailMate/Messages/IMAP/acct/Archive.mailbox"
 
 
 def _add(db: Database, index: int, *, subject: str | None = None) -> int:

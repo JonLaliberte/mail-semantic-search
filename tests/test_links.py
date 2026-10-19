@@ -142,7 +142,7 @@ def test_unknown_link_scheme_warns_instead_of_raising(caplog):
 LINK_KEYS = {"message_url", "mid_url", "markdown_link"}
 
 INBOX_PREFIX = (
-    "/Volumes/External Storage SSD/MailMate/Messages/IMAP/"
+    "/Volumes/External SSD/MailMate/Messages/IMAP/"
     "someone%40example.com@imap.example.com/INBOX.mailbox/Messages"
 )
 
