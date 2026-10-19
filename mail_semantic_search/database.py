@@ -722,9 +722,15 @@ class Database:
         params: list = ["%/INBOX.mailbox/%"]
 
         if account:
+            # The encoded account contains a literal `%` (from `%40`), so escape
+            # LIKE wildcards. Anchor on the `/` before and the `@<server>` after
+            # the account segment so `me@x.com` doesn't match `someone@x.com`.
             account_encoded = account.replace("@", "%40")
-            sql_parts.append("AND file_path LIKE ?")
-            params.append(f"%{account_encoded}%/INBOX.mailbox/%")
+            account_escaped = (
+                account_encoded.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            )
+            sql_parts.append("AND file_path LIKE ? ESCAPE '\\'")
+            params.append(f"%/{account_escaped}@%/INBOX.mailbox/%")
 
         if date_after is not None:
             sql_parts.append("AND date > ?")

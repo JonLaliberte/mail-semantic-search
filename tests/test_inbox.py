@@ -7,16 +7,16 @@ from mail_semantic_search.database import Database
 
 
 INBOX_PREFIX = (
-    "/Volumes/External Storage SSD/MailMate/Messages/IMAP/"
-    "brainstormenterprises%40gmail.com@imap.gmail.com/INBOX.mailbox/Messages"
+    "/Volumes/External SSD/MailMate/Messages/IMAP/"
+    "me%40example.com@imap.example.com/INBOX.mailbox/Messages"
 )
 ARCHIVE_PREFIX = (
-    "/Volumes/External Storage SSD/MailMate/Messages/IMAP/"
-    "brainstormenterprises%40gmail.com@imap.gmail.com/"
+    "/Volumes/External SSD/MailMate/Messages/IMAP/"
+    "me%40example.com@imap.example.com/"
     "[Gmail].mailbox/All Mail.mailbox"
 )
 OTHER_ACCOUNT_INBOX = (
-    "/Volumes/External Storage SSD/MailMate/Messages/IMAP/"
+    "/Volumes/External SSD/MailMate/Messages/IMAP/"
     "other%40example.com@imap.example.com/INBOX.mailbox/Messages"
 )
 
@@ -74,7 +74,22 @@ def test_list_inbox_emails_filter_by_account_accepts_bare_email(tmp_path):
     db = _make_db(tmp_path)
     _add(db, f"{INBOX_PREFIX}/1.eml", message_id="<a@x>", subject="mine")
     _add(db, f"{OTHER_ACCOUNT_INBOX}/2.eml", message_id="<b@x>", subject="other")
-    rows = db.list_inbox_emails(account="brainstormenterprises@gmail.com")
+    rows = db.list_inbox_emails(account="me@example.com")
+    assert [r["subject"] for r in rows] == ["mine"]
+    db.close()
+
+
+def test_list_inbox_emails_account_filter_does_not_match_suffix(tmp_path):
+    db = _make_db(tmp_path)
+    _add(db, f"{INBOX_PREFIX}/1.eml", message_id="<a@x>", subject="mine")
+    _add(
+        db,
+        "/Volumes/External SSD/MailMate/Messages/IMAP/"
+        "someone%40example.com@imap.example.com/INBOX.mailbox/Messages/2.eml",
+        message_id="<b@x>",
+        subject="someone",
+    )
+    rows = db.list_inbox_emails(account="me@example.com")
     assert [r["subject"] for r in rows] == ["mine"]
     db.close()
 
