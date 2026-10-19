@@ -150,6 +150,35 @@ As of v0.5.0, the docker-compose mount layout is `${EMAIL_DIR}:${EMAIL_DIR}:ro` 
 
 If you ever introduce a code path that resolves symlinks or otherwise canonicalizes paths, do it consistently in *both* `scan_eml_files` and `index_email_file`, or you'll get duplicate rows under different prefixes (caught and migrated by `migrate-paths`, but ugly).
 
+## Chroma full-text index bloat
+
+Chroma automatically maintains an FTS5 trigram index (`embedding_fulltext_search`) over every document in `chroma.sqlite3`. We never query it (no `where_document` / `$contains`), but Chroma has no option to turn it off, and it is the largest thing in the file. The `documents=` text has to stay in Chroma because search reads previews and reranker input from it.
+
+If this index gets corrupted, it can bloat on its own. Symptoms:
+- `chroma.sqlite3` grows much faster than the email count.
+- `PRAGMA integrity_check` reports `malformed inverted index for FTS5 table main.embedding_fulltext_search`.
+
+The segment layout (`rowid >> 37` on `embedding_fulltext_search_data`) then shows a merge that has stalled: its output segment is larger than an entire clean index, and the input segments it should replace are still there. The file keeps growing whether or not anything is being written. A healthy index grows only a few pages per upsert, so routine indexing does not cause this. In one observed case, rebuilding the index cut `chroma.sqlite3` by about a third and the FTS data by about two thirds.
+
+Check health (cheap, read-only). As a rough guide, a healthy index has about one `embedding_fulltext_search_data` page per indexed email:
+
+```bash
+sqlite3 data/chromadb/chroma.sqlite3 "SELECT COUNT(*) FROM embedding_fulltext_search_data;"
+sqlite3 data/chromadb/chroma.sqlite3 "INSERT INTO embedding_fulltext_search(embedding_fulltext_search) VALUES('integrity-check');"
+```
+
+Fix. This takes a few minutes for a large index. Stop the MCP server and any scheduled index runs first, then:
+
+```bash
+cp -c -R data/chromadb data.backup-$(date +%Y-%m-%d)-chromadb
+sqlite3 data/chromadb/chroma.sqlite3 "PRAGMA journal_mode=OFF; INSERT INTO embedding_fulltext_search(embedding_fulltext_search) VALUES('rebuild');"
+sqlite3 data/chromadb/chroma.sqlite3 "VACUUM INTO 'data/chromadb/chroma.compact.sqlite3';"
+# verify integrity_check + FTS integrity-check + COUNT(*) FROM embeddings on the compact file, then:
+mv data/chromadb/chroma.compact.sqlite3 data/chromadb/chroma.sqlite3
+```
+
+Use `rebuild`, not `optimize`: `rebuild` regenerates the index from the stored content, so it also repairs corruption. `journal_mode=OFF` is only safe because of the clone backup; it avoids a multi-GB rollback journal.
+
 ## Model loading is local-cache-first
 
 `load_model_local_first` in `model_loader.py` wraps every `SentenceTransformer` / `CrossEncoder` construction: it loads with `local_files_only=True` first and only falls back to a network-allowed load when the model isn't cached. Don't call the loaders directly — pass them through the helper.
