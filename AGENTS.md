@@ -173,3 +173,5 @@ Don't expect model memory back on Apple Silicon: after dropping the models and c
 `find` does **not** follow top-level symbolic links by default. When `EMAIL_DIR` is a symlink (a common setup for users keeping the maildir on an external SSD), a bare `find` returns zero results and the indexer silently advances the watermark, never indexing anything. Docker bind-mounts resolve the symlink at mount time, masking the bug there.
 
 `_scan_eml_files_find` in `mailmate_reader.py` passes `-L` to `find` to handle this. Don't remove that flag without a replacement.
+
+The incremental cutoff uses `-newerct` (inode change time), not `-newermt`. MailMate archives a Gmail message by renaming its `.eml` from `INBOX.mailbox` to `[Gmail].mailbox/All Mail.mailbox` (same filename), which preserves mtime and bumps only ctime. With an mtime cutoff the moved file was never a candidate, `_handle_move_detection` never ran, and the index kept the dead INBOX path — ~10k such rows (1.5%) had piled up by 2026-10-30. The Python fallback scan uses `st_ctime` for the same reason.

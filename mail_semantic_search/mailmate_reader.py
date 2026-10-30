@@ -562,7 +562,15 @@ def scan_eml_files(
 
 
 def _scan_eml_files_find(directory: Path, modified_after: datetime) -> Iterator[Path]:
-    """Use `find` to list .eml files newer than modified_after."""
+    """Use `find` to list .eml files whose inode changed after modified_after.
+
+    Filters on change time (ctime), not mtime. MailMate moves a message
+    between mailboxes (e.g. archiving a Gmail message from INBOX to All Mail)
+    by renaming the .eml, which keeps the original mtime but bumps ctime. An
+    mtime cutoff never sees the moved file, so move detection never runs and
+    the index keeps pointing at the vanished INBOX path. Content writes bump
+    ctime too, so this is a superset of the mtime filter.
+    """
     cutoff = modified_after.strftime("%Y-%m-%d %H:%M:%S")
     # `-L` makes find follow symbolic links. Without it, when EMAIL_DIR
     # itself is a symlink (e.g. macOS users symlinking the MailMate
@@ -577,7 +585,7 @@ def _scan_eml_files_find(directory: Path, modified_after: datetime) -> Iterator[
         "f",
         "-name",
         "*.eml",
-        "-newermt",
+        "-newerct",
         cutoff,
     ]
     try:
@@ -601,11 +609,14 @@ def _scan_eml_files_find(directory: Path, modified_after: datetime) -> Iterator[
 
 
 def _scan_eml_files_python(directory: Path, modified_after: datetime) -> Iterator[Path]:
-    """Fallback mtime-based scan when `find` is unavailable."""
+    """Fallback ctime-based scan when `find` is unavailable.
+
+    Uses ctime for the same reason as _scan_eml_files_find.
+    """
     cutoff_ts = modified_after.timestamp()
     for file_path in directory.rglob("*.eml"):
         try:
-            if file_path.stat().st_mtime > cutoff_ts:
+            if file_path.stat().st_ctime > cutoff_ts:
                 yield file_path
         except OSError:
             continue
