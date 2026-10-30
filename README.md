@@ -130,7 +130,7 @@ Release notes (including the changelog generated from commits and PRs) live on t
 Incremental behavior (`index --incremental`):
 - Uses the last successful incremental scan time as the primary watermark.
 - Falls back to the maximum indexed file mtime for older indexes that predate the watermark.
-- Scans files whose filesystem mtime is newer than `watermark - INCREMENTAL_OVERLAP_SECONDS` (default: 24 hours).
+- Scans files whose filesystem change time (ctime) is newer than `watermark - INCREMENTAL_OVERLAP_SECONDS` (default: 24 hours). Change time, not mtime, because MailMate moves a message between mailboxes (e.g. archiving a Gmail message from Inbox to All Mail) by renaming the file, which keeps its old mtime. Moved messages are picked up on the next run and their index entry repointed to the new path.
 - Advances the watermark only after a fully successful incremental run.
 - Still writes updates by file path and vector ID, so reruns stay idempotent for changed files in the candidate set.
 
