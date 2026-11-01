@@ -1,10 +1,15 @@
 # Agent Notes
 
-Working notes for AI agents and human maintainers. Everything user-facing lives in `README.md`; this file is for the bits that would otherwise clutter the README.
+Working notes for AI agents and human maintainers. User-facing docs live in `README.md`, `docs/` and `llms-install.md`; this file is for the bits that would otherwise clutter them.
 
 ## Doc maintenance
 
-- Keep `README.md` up to date when changing user-facing behavior: setup steps, CLI commands or flags, environment variables, Docker usage, scheduling guidance, troubleshooting.
+- User-facing docs are split by audience:
+  - `README.md` is the front page: pitch, quick install, the AI-assisted install prompt, the Claude hookup, and links into `docs/`. Keep it short. Detail belongs in `docs/`.
+  - `docs/installation.md`, `docs/configuration.md` (every env var), `docs/cli.md` (every command and flag), `docs/mcp.md` (tools, client setup, HTTP transport), `docs/scheduling.md`, `docs/troubleshooting.md`.
+  - `llms-install.md` (repo root, following Cline's convention) is the step-by-step install script that coding agents follow. The README's copy-paste prompt points at its raw GitHub URL, so keep it at that path.
+- Update the matching `docs/` page when changing user-facing behavior: setup steps, CLI commands or flags, environment variables, Docker usage, MCP tools, scheduling guidance, troubleshooting. If install steps change, update `README.md`, `docs/installation.md` and `llms-install.md` together.
+- `docs/superpowers/` holds internal design specs and plans, not user docs.
 - Keep `AGENTS.md` up to date when changing maintainer-facing behavior: release flow, internal tooling, migration commands, dev setup.
 - Update docs in the same change that affects behavior — don't leave follow-up cleanup work.
 - If behavior changed and the correct target is unclear, update both files.
