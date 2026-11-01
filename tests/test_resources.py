@@ -7,6 +7,11 @@ import pytest
 from mail_semantic_search import resources
 
 
+# Stand-in for Chroma's write sequence number; tests bump it to simulate an
+# index run in another process.
+generation = [1]
+
+
 class _FakeStore:
     opened = 0
     closed = 0
@@ -33,7 +38,9 @@ def fakes(monkeypatch):
     monkeypatch.setattr(resources, "VectorStore", _FakeStore)
     monkeypatch.setattr(resources, "EmbeddingService", _loader("embedding"))
     monkeypatch.setattr(resources, "CrossEncoderReranker", _loader("reranker"))
-    for name in ("_embedding_service", "_reranker", "_keepalive_store"):
+    monkeypatch.setattr(resources, "index_generation", lambda path: generation[0])
+    generation[0] = 1
+    for name in ("_embedding_service", "_reranker", "_keepalive_store", "_keepalive_generation"):
         monkeypatch.setattr(resources, name, None)
     monkeypatch.setattr(resources, "_active", 0)
     return loads
@@ -53,6 +60,29 @@ def test_in_use_holds_one_store_open_across_calls():
 
     assert _FakeStore.opened == 1
     assert _FakeStore.closed == 0
+
+
+def test_in_use_reopens_the_store_after_another_process_writes():
+    with resources.in_use():
+        pass
+    generation[0] += 1
+    with resources.in_use():
+        pass
+
+    assert _FakeStore.opened == 2
+    assert _FakeStore.closed == 1
+
+
+def test_in_use_never_reopens_mid_request():
+    with resources.in_use():
+        generation[0] += 1
+        with resources.in_use():
+            pass
+        assert _FakeStore.closed == 0
+
+    with resources.in_use():
+        pass
+    assert _FakeStore.opened == 2
 
 
 def test_release_if_idle_drops_everything_and_next_use_reloads(fakes):
