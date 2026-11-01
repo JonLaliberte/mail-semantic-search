@@ -407,7 +407,7 @@ def _log_startup_status_async() -> None:
                 "This is usually the MCP *parent app* (not this repo) blocking access to the "
                 "configured database path—for example SQLite on `/Volumes/...` while Docker uses "
                 "the same files fine. Same single dataset: run MCP inside `docker compose` "
-                "(see README: MCP via Docker), grant Full Disk Access, or use the HTTP transport "
+                "(see docs/mcp.md: MCP via Docker), grant Full Disk Access, or use the HTTP transport "
                 "(MCP_TRANSPORT=http) and run this from a terminal that has FDA."
             )
             msg = (
