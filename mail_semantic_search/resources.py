@@ -20,8 +20,9 @@ from contextlib import contextmanager
 from typing import Iterator, Optional
 
 from mail_semantic_search.embedding_service import EmbeddingService
+from mail_semantic_search.config import config
 from mail_semantic_search.reranker import CrossEncoderReranker
-from mail_semantic_search.vector_store import VectorStore
+from mail_semantic_search.vector_store import VectorStore, index_generation
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,8 @@ _reranker: Optional[CrossEncoderReranker] = None
 # Never queried directly: holding one store open keeps Chroma's refcounted
 # per-path system (and with it the loaded index) alive between tool calls.
 _keepalive_store: Optional[VectorStore] = None
+# Chroma's write sequence number when the keepalive store was opened.
+_keepalive_generation: Optional[int] = None
 
 
 def get_embedding_service() -> EmbeddingService:
@@ -59,11 +62,24 @@ def get_reranker() -> CrossEncoderReranker:
 @contextmanager
 def in_use() -> Iterator[None]:
     """Mark the shared resources busy for the duration of one request."""
-    global _active, _keepalive_store
+    global _active, _keepalive_store, _keepalive_generation
     with _lock:
+        if (
+            not _active
+            and _keepalive_store is not None
+            and index_generation(config.chromadb_path) != _keepalive_generation
+        ):
+            # An index run in another process wrote since we loaded. Chroma
+            # never reloads a loaded index, so it would keep returning deleted
+            # vectors and miss new mail; closing the last handle frees it.
+            _keepalive_store.close()
+            _keepalive_store = None
+            logger.info("Vector index changed on disk; reloading it")
         _active += 1
         if _keepalive_store is None:
             try:
+                # Read before opening: a write in between only costs a reload.
+                _keepalive_generation = index_generation(config.chromadb_path)
                 _keepalive_store = VectorStore()
             except Exception as exc:
                 # Tools that never touch Chroma must keep working when the

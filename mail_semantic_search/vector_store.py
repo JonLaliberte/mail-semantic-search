@@ -34,6 +34,28 @@ def vacuum_chroma_sqlite(chromadb_path: Path) -> None:
         conn.close()
 
 
+def index_generation(chromadb_path: Path) -> Optional[int]:
+    """Return Chroma's latest write sequence number, or None if unreadable.
+
+    Every add, upsert, or delete from any process raises it; reads leave it
+    alone. A client loads the HNSW index once and never sees another process's
+    writes, so long-lived holders compare this against the value from when
+    they opened the store to know when to reopen it.
+    """
+    db_file = Path(chromadb_path) / "chroma.sqlite3"
+    if not db_file.exists():
+        return None
+    try:
+        conn = sqlite3.connect(f"file:{db_file}?mode=ro", uri=True)
+        try:
+            return conn.execute("SELECT MAX(seq_id) FROM max_seq_id").fetchone()[0]
+        finally:
+            conn.close()
+    except sqlite3.Error as e:
+        logger.debug(f"Could not read Chroma write sequence: {e}")
+        return None
+
+
 class VectorStore:
     """Vector store for email embeddings using ChromaDB."""
 
@@ -207,6 +229,10 @@ class VectorStore:
         emails = []
         if results["ids"] and len(results["ids"][0]) > 0:
             for i in range(len(results["ids"][0])):
+                if results["metadatas"] and results["metadatas"][0][i] is None:
+                    # Deleted by another process after this client loaded the
+                    # index; Chroma still returns the ID but its row is gone.
+                    continue
                 email_data = {
                     "id": results["ids"][0][i],
                     "distance": results["distances"][0][i]

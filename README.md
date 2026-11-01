@@ -89,7 +89,7 @@ All configuration is done via the `.env` file:
 - `MCP_HOST`: HTTP bind address when `MCP_TRANSPORT=http` (default: `127.0.0.1`, loopback only)
 - `MCP_PORT`: HTTP port (default: `6543`)
 - `MCP_PATH`: HTTP URL path (default: `/mcp`)
-- `MCP_IDLE_UNLOAD_SECONDS`: How long the MCP server keeps the vector index and models in memory after the last tool call (default: `600`). The index is held fully in RAM — several GB on a large mailbox — so a long-running server releases it once idle and reloads it on the next call (a few seconds). Set `0` to keep everything loaded permanently.
+- `MCP_IDLE_UNLOAD_SECONDS`: How long the MCP server keeps the vector index and models in memory after the last tool call (default: `600`). The index is held fully in RAM — several GB on a large mailbox — so a long-running server releases it once idle and reloads it on the next call (a few seconds). Set `0` to keep everything loaded permanently. Either way, the server reloads the index on the next call after an `index` run (or any other command that changes it), so results never lag behind the last run.
 - `LOG_PATH`: Runtime log file for internal warnings/errors/diagnostics (default: `./data/logs/mail-semantic-search.error.log`)
 - `LOG_LEVEL`: App log verbosity written to `LOG_PATH` (default: `INFO`)
 - `LOG_THIRD_PARTY_LEVEL`: Third-party library log verbosity written to `LOG_PATH` (default: `WARNING`)

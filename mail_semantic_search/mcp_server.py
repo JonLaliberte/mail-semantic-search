@@ -18,7 +18,8 @@ letting it spawn the process. Defaults:
 
 The vector index and models are held in memory between tool calls and released
 after MCP_IDLE_UNLOAD_SECONDS without one (default: 600; 0 keeps them loaded
-forever). The first call after a release reloads them.
+forever). The first call after a release reloads them. The index is also
+reloaded on the first call after another process (an index run) writes to it.
 """
 
 import logging
