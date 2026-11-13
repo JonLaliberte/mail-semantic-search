@@ -38,7 +38,7 @@ All three are `null` when a message has no Message-ID. `message_url` is percent-
 
 ## Memory and freshness
 
-ChromaDB holds the whole vector index in RAM while it's loaded, which is several GB for a large mailbox. The server releases the index and models after `MCP_IDLE_UNLOAD_SECONDS` (default 10 minutes) without a call, then reloads them in a few seconds on the next one. After an `index` run or any other command that changes the index, the server reloads automatically on its next call, so results never lag behind the last run.
+ChromaDB holds the whole vector index in RAM while it's loaded, which is several GB for a large mailbox. The server releases the index and models after `MCP_IDLE_UNLOAD_SECONDS` (default 10 minutes) without a call, then reloads them in a few seconds on the next one. After an `index` run or any other command that changes the index, the server reloads automatically on its next call, so results never lag behind the last run. With `MCP_INDEX_INTERVAL_SECONDS` set, the server does the indexing itself and needs no reload; see [Index inside the MCP server](scheduling.md#index-inside-the-mcp-server).
 
 ## Claude Desktop (macOS)
 
@@ -137,6 +137,8 @@ disown
 ```
 
 You can add a second **Periodic** trigger (every 5 minutes) that runs the same script. The `lsof` check makes repeat runs harmless, and the server comes back if it ever dies.
+
+To have this server keep the index current too, add `MCP_INDEX_INTERVAL_SECONDS=300` next to `MCP_TRANSPORT=http` and remove any separate scheduled index job. See [Index inside the MCP server](scheduling.md#index-inside-the-mcp-server).
 
 **2. Point Claude Desktop at it through a bridge.** Claude Desktop doesn't speak HTTP MCP natively; it silently ignores a bare `"url"` field. Use `mcp-remote`:
 

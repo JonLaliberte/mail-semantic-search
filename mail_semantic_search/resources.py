@@ -31,6 +31,9 @@ _lock = threading.Lock()
 # which the server enters on its event loop.
 _load_lock = threading.Lock()
 _active = 0
+# Scheduled index runs in progress. They hold the shared model without
+# counting as tool calls, so they keep it loaded but don't reset the idle timer.
+_indexing = 0
 _last_used = time.monotonic()
 _embedding_service: Optional[EmbeddingService] = None
 _reranker: Optional[CrossEncoderReranker] = None
@@ -66,6 +69,7 @@ def in_use() -> Iterator[None]:
     with _lock:
         if (
             not _active
+            and not _indexing
             and _keepalive_store is not None
             and index_generation(config.chromadb_path) != _keepalive_generation
         ):
@@ -76,15 +80,7 @@ def in_use() -> Iterator[None]:
             _keepalive_store = None
             logger.info("Vector index changed on disk; reloading it")
         _active += 1
-        if _keepalive_store is None:
-            try:
-                # Read before opening: a write in between only costs a reload.
-                _keepalive_generation = index_generation(config.chromadb_path)
-                _keepalive_store = VectorStore()
-            except Exception as exc:
-                # Tools that never touch Chroma must keep working when the
-                # index can't be opened; those that do will report it themselves.
-                logger.debug("Could not hold the vector store open: %s", exc)
+        _open_keepalive_locked()
     try:
         yield
     finally:
@@ -94,12 +90,66 @@ def in_use() -> Iterator[None]:
             _last_used = time.monotonic()
 
 
+def _open_keepalive_locked() -> None:
+    """Hold one store open if none is; call with `_lock` held."""
+    global _keepalive_store, _keepalive_generation
+    if _keepalive_store is not None:
+        return
+    try:
+        # Read before opening: a write in between only costs a reload.
+        _keepalive_generation = index_generation(config.chromadb_path)
+        _keepalive_store = VectorStore()
+    except Exception as exc:
+        # Tools that never touch Chroma must keep working when the
+        # index can't be opened; those that do will report it themselves.
+        logger.debug("Could not hold the vector store open: %s", exc)
+
+
+@contextmanager
+def indexing() -> Iterator[None]:
+    """Keep the shared models and index loaded while a scheduled run uses them.
+
+    Without this the idle reaper could drop the model mid-run, and the next
+    tool call would load a second copy beside the one the run still holds.
+    Holding the keepalive store also means the run's own store is never the
+    last handle on Chroma's shared system, so closing it can't stop that
+    system while a tool call is opening it.
+    """
+    global _indexing
+    with _lock:
+        _indexing += 1
+        _open_keepalive_locked()
+    try:
+        yield
+    finally:
+        with _lock:
+            _indexing -= 1
+
+
+def mark_index_current() -> None:
+    """Accept the index's current write sequence as already seen.
+
+    Call after this process writes to the index itself (the scheduled index
+    run). Its writes already went into the loaded index, so the next tool call
+    has no reason to throw it away and load it again from disk.
+    """
+    global _keepalive_generation
+    with _lock:
+        if _keepalive_store is not None:
+            _keepalive_generation = index_generation(config.chromadb_path)
+
+
 def release_if_idle(idle_seconds: float) -> bool:
     """Drop the index and models if unused for `idle_seconds`. Returns whether it did."""
     global _embedding_service, _reranker, _keepalive_store
     with _lock:
         loaded = _keepalive_store or _embedding_service or _reranker
-        if not loaded or _active or time.monotonic() - _last_used < idle_seconds:
+        if (
+            not loaded
+            or _active
+            or _indexing
+            or time.monotonic() - _last_used < idle_seconds
+        ):
             return False
         store, _keepalive_store = _keepalive_store, None
         _embedding_service = _reranker = None

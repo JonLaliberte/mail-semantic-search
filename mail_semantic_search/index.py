@@ -9,7 +9,7 @@ import time
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, TypedDict
+from typing import Any, Callable, Dict, Iterator, List, Optional, TypedDict
 
 from tqdm import tqdm
 
@@ -348,9 +348,28 @@ def index_emails(
     skip_indexed: bool = True,
     show_progress: bool = True,
     incremental: bool = False,
-) -> None:
-    """Index all emails from the email directory."""
+    embedding_service_factory: Callable[[], EmbeddingService] = EmbeddingService,
+    should_stop: Optional[Callable[[], bool]] = None,
+) -> Dict[str, Any]:
+    """Index all emails from the email directory.
+
+    `embedding_service_factory` lets a long-lived caller (the MCP server's
+    index schedule) hand over its already-loaded model instead of loading a
+    fresh one every run. `should_stop` is checked before each batch; when it
+    returns True the run ends between batches, like Ctrl-C, without advancing
+    the incremental watermark (the server uses it to shut down cleanly).
+
+    Returns a summary: `ran` (False when another process held the index lock),
+    `indexed`, `skipped`, `batch_failures`, and `interrupted`.
+    """
     email_dir = config.email_dir
+    summary: Dict[str, Any] = {
+        "ran": False,
+        "indexed": 0,
+        "skipped": 0,
+        "batch_failures": 0,
+        "interrupted": False,
+    }
 
     if not email_dir.exists():
         raise FileNotFoundError(
@@ -364,7 +383,8 @@ def index_emails(
     # a backfill is in flight (its lock is "backfill"-kinded).
     lock_kind = "incremental" if (incremental and skip_indexed) else "full"
     if not _acquire_index_lock_or_skip(lock_kind):
-        return
+        return summary
+    summary["ran"] = True
 
     print(f"Indexing emails from: {email_dir}")
     print(f"Using embedding model: {config.embedding_model}")
@@ -435,7 +455,7 @@ def index_emails(
                     "Updated incremental scan watermark to: "
                     f"{watermark.isoformat()}"
                 )
-            return
+            return summary
 
         # Defer model load until the first batch that actually has work to
         # embed. If every candidate gets filtered out by the should_skip
@@ -497,6 +517,10 @@ def index_emails(
             for batch_number, batch in enumerate(batch_iter, start=1):
                 if limit and total_indexed >= limit:
                     break
+                if should_stop is not None and should_stop():
+                    print("\nIndexing stopped between batches for shutdown")
+                    run_interrupted = True
+                    break
 
                 diagnostics.start_batch(batch_number, batch)
                 total_seen += len(batch)
@@ -532,7 +556,7 @@ def index_emails(
                     diagnostics.set_phase(
                         "loading_embedding_model", emails_to_index
                     )
-                    embedding_service = EmbeddingService()
+                    embedding_service = embedding_service_factory()
 
                 # Get file modification times
                 diagnostics.set_phase("collecting_mtimes", emails_to_index)
@@ -638,6 +662,14 @@ def index_emails(
             print(f"Total indexed in ChromaDB: {stats_after['total_emails']} emails")
             print(f"Total indexed in database: {db_stats_after['total_emails']} emails")
             print(f"Total attachments: {db_stats_after['total_attachments']}")
+
+        summary.update(
+            indexed=total_indexed,
+            skipped=total_skipped,
+            batch_failures=batch_failures,
+            interrupted=run_interrupted,
+        )
+        return summary
 
 
 def _reextract_single(

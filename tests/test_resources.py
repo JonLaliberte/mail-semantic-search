@@ -85,6 +85,25 @@ def test_in_use_never_reopens_mid_request():
     assert _FakeStore.opened == 2
 
 
+def test_own_writes_marked_current_do_not_force_a_reload():
+    """The server's scheduled index run writes into the loaded index itself."""
+    with resources.in_use():
+        pass
+    generation[0] += 1
+    resources.mark_index_current()
+    with resources.in_use():
+        pass
+
+    assert _FakeStore.opened == 1
+    assert _FakeStore.closed == 0
+
+
+def test_mark_index_current_is_a_no_op_with_nothing_loaded():
+    generation[0] += 1
+    resources.mark_index_current()
+    assert resources._keepalive_generation is None
+
+
 def test_release_if_idle_drops_everything_and_next_use_reloads(fakes):
     with resources.in_use():
         resources.get_embedding_service()
@@ -112,6 +131,33 @@ def test_release_never_happens_mid_request():
     with resources.in_use():
         assert resources.release_if_idle(0) is False
     assert _FakeStore.closed == 0
+
+
+def test_a_scheduled_run_holds_the_index_open_and_its_writes_cause_no_reload(monkeypatch):
+    monkeypatch.setattr(resources, "_indexing", 0)
+    with resources.indexing():
+        assert _FakeStore.opened == 1
+        generation[0] += 1  # the run writes
+        with resources.in_use():  # a tool call mid-run: same store, no reload
+            pass
+        resources.mark_index_current()
+    with resources.in_use():
+        pass
+    assert _FakeStore.opened == 1
+    assert _FakeStore.closed == 0
+
+
+def test_release_waits_for_a_scheduled_index_run(fakes, monkeypatch):
+    """The run holds the shared model; dropping it would make the next call load a second copy."""
+    monkeypatch.setattr(resources, "_indexing", 0)
+    monkeypatch.setattr(resources, "_last_used", 0.0)  # long idle
+    model = resources.get_embedding_service()
+    with resources.indexing():
+        assert resources.release_if_idle(1) is False
+        with resources.in_use():
+            assert resources.get_embedding_service() is model
+    assert fakes["embedding"] == 1
+    assert resources.release_if_idle(0) is True
 
 
 def test_in_use_survives_an_unopenable_index(monkeypatch):

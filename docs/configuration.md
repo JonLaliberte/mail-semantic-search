@@ -72,6 +72,7 @@ Both of these are off by default and run entirely locally.
 | `MCP_HOST` | `127.0.0.1` | HTTP bind address. Loopback only by default. |
 | `MCP_PORT` | `6543` | HTTP port. |
 | `MCP_PATH` | `/mcp` | HTTP URL path. |
+| `MCP_INDEX_INTERVAL_SECONDS` | `0` (off) | HTTP transports only. Index new mail inside the server every this many seconds (`300` works well), so the server is the only process that opens the index. While it runs, CLI commands that open the index refuse to start; the value must be 0 or 30 to 86400. See [Index inside the MCP server](scheduling.md#index-inside-the-mcp-server). |
 | `MCP_IDLE_UNLOAD_SECONDS` | `600` | How long the server keeps the vector index and models in memory after the last tool call. The index is held fully in RAM (several GB for a large mailbox), so an idle server releases it and reloads it on the next call in a few seconds. `0` keeps everything loaded. Either way, the server picks up new index runs automatically. |
 
 ## Logging

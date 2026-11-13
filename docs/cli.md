@@ -10,6 +10,8 @@ docker compose run --rm mail-semantic-search <command> [options]
 
 `mail-semantic-search --help` and `<command> --help` list every option. `--version` prints the installed version.
 
+Commands that open the index (everything except `query`, `stage` and `clear-staged`) take a lock on it for as long as they run, because the index can't safely be open in two processes at once. If another command or an [MCP server that indexes on its own](scheduling.md#index-inside-the-mcp-server) has it, the command says who and exits 1. `index --incremental` and `index-file` (without `--force`) print a skip line and exit 0 instead, so scheduled jobs and MailMate rules don't raise alerts.
+
 ## Indexing
 
 ### `index`

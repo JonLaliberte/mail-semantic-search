@@ -20,19 +20,28 @@ The vector index and models are held in memory between tool calls and released
 after MCP_IDLE_UNLOAD_SECONDS without one (default: 600; 0 keeps them loaded
 forever). The first call after a release reloads them. The index is also
 reloaded on the first call after another process (an index run) writes to it.
+
+With an HTTP transport, MCP_INDEX_INTERVAL_SECONDS (default: 0, off) makes the
+server index new mail itself on that interval, so it is the only process that
+ever writes the index. Use it instead of a separate scheduled
+`index --incremental`; see index_schedule.py for why.
 """
 
+import atexit
 import logging
 import os
 import platform
+import signal
 import sys
 from datetime import datetime
 from typing import Optional
 
+import anyio
 from fastmcp import FastMCP
+from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import Middleware
 
-from mail_semantic_search import resources
+from mail_semantic_search import index_schedule, resources
 from mail_semantic_search.config import config
 from mail_semantic_search.runtime_logging import (
     configure_logging,
@@ -56,6 +65,8 @@ class _ResourceUseMiddleware(Middleware):
     """Keep the index and models loaded while any tool call is in flight."""
 
     async def on_call_tool(self, context, call_next):
+        # Off the event loop: taking the lock can open SQLite and wait on it.
+        await anyio.to_thread.run_sync(index_schedule.ensure_index_available)
         with resources.in_use():
             return await call_next(context)
 
@@ -396,7 +407,15 @@ def _log_startup_status_async() -> None:
 
     def _probe() -> None:
         try:
-            status = get_status_data_payload()
+            try:
+                index_schedule.ensure_index_available()
+            except ToolError as exc:
+                logger.info("MCP startup index: skipped (%s)", exc)
+                return
+            # Through the shared resources like a tool call, so this probe's
+            # store is never the last handle on Chroma's shared system.
+            with resources.in_use():
+                status = get_status_data_payload()
             logger.info(
                 "MCP startup index: total_indexed_emails=%s total_emails=%s",
                 status.get("total_indexed_emails"),
@@ -446,10 +465,45 @@ def main() -> None:
         # Print to stderr so a terminal launch shows the URL immediately.
         print(startup_msg, file=sys.stderr)
 
+    # Take the index (if scheduling) before anything here opens Chroma.
+    _start_index_schedule(transport)
     _log_startup_status_async()
     if idle_seconds:
         resources.start_idle_reaper(idle_seconds)
     mcp.run(transport=transport, **kwargs)
+
+
+def _start_index_schedule(transport: str) -> None:
+    """Start in-process incremental indexing when configured for this transport."""
+    if transport == "stdio":
+        # Don't parse it here: a bad value must not stop a stdio server.
+        if os.getenv("MCP_INDEX_INTERVAL_SECONDS", "").strip() not in ("", "0"):
+            _warn_stdio_interval_ignored()
+        return
+    interval = index_schedule.index_interval_seconds()
+    if not interval:
+        return
+    index_schedule.start_index_schedule(interval)
+    # A stop must not cut an index batch in half. uvicorn handles SIGTERM
+    # itself, then restores the handler that was installed before it started
+    # and re-raises the signal; ours turns that into a normal exit so the
+    # atexit hook below runs (Python's default handler would just kill us).
+    signal.signal(signal.SIGTERM, _exit_on_sigterm)
+    atexit.register(index_schedule.shutdown)
+
+
+def _exit_on_sigterm(signum, frame) -> None:
+    raise SystemExit(0)
+
+
+def _warn_stdio_interval_ignored() -> None:
+    msg = (
+        "MCP_INDEX_INTERVAL_SECONDS is ignored with the stdio transport: clients "
+        "start one stdio server per app, and each would index on its own. Run the "
+        "server over HTTP (MCP_TRANSPORT=http) to have it index new mail."
+    )
+    logger.warning(msg)
+    print(msg, file=sys.stderr)
 
 
 if __name__ == "__main__":

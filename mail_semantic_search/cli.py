@@ -10,6 +10,9 @@ import click
 
 from mail_semantic_search.database import Database, get_file_hash
 from mail_semantic_search.index import index_email_file, index_emails
+from mail_semantic_search.index_lock import SERVER_ROLE, IndexLock
+from mail_semantic_search.index_lock import describe as describe_lock_holder
+from mail_semantic_search.index_lock import holder as index_lock_holder
 from mail_semantic_search.vector_store import VectorStore, vacuum_chroma_sqlite
 from mail_semantic_search.runtime_logging import (
     configure_logging,
@@ -61,6 +64,55 @@ def handle_error(
     sys.exit(exit_code)
 
 
+def claim_index_or_exit(*, skip_quietly: bool = False) -> None:
+    """Take the index lock for this command's run, or stop here.
+
+    Chroma's local mode breaks when two processes open the same index, and
+    even a read applies pending writes to the files on disk. So every command
+    that opens the index holds an OS file lock (see index_lock.py) until it
+    finishes; an MCP server with MCP_INDEX_INTERVAL_SECONDS holds it for as
+    long as it runs.
+
+    `skip_quietly` is for `index --incremental` and `index-file`, which may be
+    wired to a cron job, Keyboard Maestro macro or MailMate rule. Whoever holds
+    the index will pick up the same mail, so they print a skip line without
+    the words "error" or "warning" (which such jobs alert on) and exit 0.
+    """
+    ctx = click.get_current_context()
+    lock = IndexLock()
+    role = ctx.info_name or "cli"
+    try:
+        acquired = lock.try_acquire(role)
+        info = None if acquired else index_lock_holder()
+        if not acquired and info is None:
+            # Freed between our attempt and the check (or a probe had it for
+            # an instant): try once more before reporting.
+            acquired = lock.try_acquire(role)
+            info = {}
+    except OSError as exc:
+        # Fail closed: running without the lock is exactly how the index
+        # got corrupted.
+        handle_error(
+            f"Could not take the index lock at {lock.path} ({exc}). "
+            "Fix its permissions, or delete it while no server or command is running."
+        )
+    if acquired:
+        ctx.call_on_close(lock.release)
+        return
+    who = describe_lock_holder(info)
+    if skip_quietly:
+        click.echo(f"The index is in use by {who}; skipping this run.")
+        sys.exit(0)
+    if info.get("role") == SERVER_ROLE:
+        hint = (
+            "It indexes new mail on a schedule (MCP_INDEX_INTERVAL_SECONDS). "
+            "Use its tools, or stop it before running this command."
+        )
+    else:
+        hint = "Wait for it to finish, then try again."
+    handle_error(f"The index is in use by {who}. {hint}")
+
+
 @click.group()
 @click.version_option(
     version=resolve_version(),
@@ -96,6 +148,7 @@ def main():
 )
 def index(limit: int, no_skip: bool, incremental: bool):
     """Index emails from a local directory."""
+    claim_index_or_exit(skip_quietly=incremental and not no_skip and limit is None)
     try:
         index_emails(
             limit=limit,
@@ -118,6 +171,7 @@ def index(limit: int, no_skip: bool, incremental: bool):
 )
 def index_file(file_path: str, force: bool):
     """Index a single .eml file (e.g. from a MailMate rule on new mail)."""
+    claim_index_or_exit(skip_quietly=not force)
     from pathlib import Path
 
     try:
@@ -174,6 +228,7 @@ def search(
     rerank: Optional[bool],
 ):
     """Search for emails using natural language query with optional filters."""
+    claim_index_or_exit()
     # Issue #13: Standardized date parsing with consistent error messages
     parsed_date_after, error = parse_date(date_after, "--date-after")
     if error:
@@ -292,6 +347,7 @@ def query(
 )
 def inspect(file_path: str):
     """Show indexed SQLite and Chroma data for one email."""
+    claim_index_or_exit()
     try:
         data = get_indexed_email_data(file_path)
         if not data:
@@ -306,6 +362,7 @@ def inspect(file_path: str):
 @main.command()
 def status():
     """Show indexing status and statistics."""
+    claim_index_or_exit()
     try:
         status_data = get_status_data()
 
@@ -349,6 +406,7 @@ def dedup(dry_run: bool):
 
     Safe to run multiple times (idempotent).
     """
+    claim_index_or_exit()
     try:
         with Database() as database, VectorStore() as vector_store:
             if dry_run:
@@ -391,6 +449,7 @@ def prune(dry_run: bool, batch_size: int):
 
     Safe to run multiple times (idempotent).
     """
+    claim_index_or_exit()
     from pathlib import Path
 
     from mail_semantic_search.config import config
@@ -486,6 +545,7 @@ def reextract(
     Resumable: completed rows have their extraction_version bumped to the
     current value, so interrupting and re-running picks up where it left off.
     """
+    claim_index_or_exit()
     from mail_semantic_search.index import _reextract_single, _reextract_bulk
 
     selectors = [bool(file_path), bool(message_id)]
@@ -571,6 +631,7 @@ def migrate_paths(old_prefix: str, new_prefix: str, batch_size: int, dry_run: bo
     Idempotent: rows whose new-id already exists in Chroma are skipped, so
     interrupted runs can be re-run safely.
     """
+    claim_index_or_exit()
     if not old_prefix.endswith("/"):
         old_prefix = old_prefix + "/"
     if not new_prefix.endswith("/"):
@@ -714,6 +775,7 @@ def compact_vectors(batch_size: int, dry_run: bool):
     Stop the MCP server first and back up the data directory; restart the
     server afterwards. Safe to re-run if interrupted.
     """
+    claim_index_or_exit()
     try:
         with Database() as database, VectorStore() as vector_store:
             live = vector_store.get_stats()["total_emails"]
