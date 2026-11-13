@@ -3,6 +3,7 @@
 from contextlib import ExitStack, redirect_stdout
 import logging
 import os
+import threading
 from typing import List, Optional
 
 from sentence_transformers import SentenceTransformer
@@ -38,6 +39,10 @@ class EmbeddingService:
     def __init__(self, model_name: Optional[str] = None):
         """Initialize the embedding service with a model."""
         configure_logging()
+        # The MCP server shares one instance between tool calls and its
+        # scheduled index run; PyTorch (MPS especially) isn't reliably safe
+        # for concurrent forward passes on one module.
+        self._encode_lock = threading.Lock()
         configured_model = model_name or config.embedding_model
         self.model_name = resolve_model_name(configured_model)
 
@@ -66,11 +71,13 @@ class EmbeddingService:
         """Generate embeddings for a list of texts."""
         if not texts:
             return []
-        return self.model.encode(texts, show_progress_bar=False).tolist()
+        with self._encode_lock:
+            return self.model.encode(texts, show_progress_bar=False).tolist()
 
     def embed_query(self, query: str) -> List[float]:
         """Generate embedding for a single query."""
-        return self.model.encode([query], show_progress_bar=False)[0].tolist()
+        with self._encode_lock:
+            return self.model.encode([query], show_progress_bar=False)[0].tolist()
 
     def get_embedding_dimension(self) -> int:
         """Get the dimension of embeddings produced by this model."""

@@ -2,6 +2,27 @@
 
 Search only covers mail that has been indexed. Run `index --incremental` on a schedule so new mail shows up: daily at minimum, every hour or few hours for best results. The MCP server picks up each run automatically, so there's nothing to restart.
 
+## Index inside the MCP server
+
+If you run the [MCP server over HTTP](mcp.md#mcp-over-http-full-disk-access-workaround) and leave it up, let it do the indexing:
+
+```bash
+MCP_TRANSPORT=http MCP_INDEX_INTERVAL_SECONDS=300 .venv/bin/mail-semantic-search-mcp
+```
+
+Use this **instead of** a scheduled `index --incremental`, not alongside it. ChromaDB's local storage isn't safe for two processes at once (even a search writes pending changes to disk), and a long-running server plus a separate index job every few minutes has corrupted the index in practice. With the interval set, the server is the only process that opens it:
+
+- It runs an incremental pass 30 seconds after startup, then waits the interval between the end of one run and the start of the next.
+- It reuses the embedding model it already has loaded, and new mail is searchable as soon as a run finishes.
+- On macOS it posts a notification when runs start failing (once, not every run). Details go to `LOG_PATH`.
+- While it's up, CLI commands that open the index (`search`, `status`, `prune`, `compact-vectors` and so on) refuse to run. Use the MCP tools, or stop the server for maintenance. A leftover `index --incremental` job or `index-file` rule prints a skip line and exits 0, so it won't trigger alerts.
+- If something restarts the server while a maintenance command is still running, the server waits: its tools answer "index in use" and it takes over the index once the command finishes.
+- Stopping the server lets an index batch in progress finish first (up to a minute). Under launchd, set `ExitTimeOut` to 60 or more in the server's plist; the default of 20 seconds kills it before the batch can finish.
+
+The lock is an OS file lock next to the database, so it can't go stale after a crash. It only works within one machine: don't point a Docker container and a native install at the same data directory while either is running.
+
+This only works with the HTTP transports. With stdio, each MCP client starts its own copy of the server, so use one of the scheduled commands below.
+
 ## Pick a command
 
 Both commands write identical file paths into the index, so you can mix them.
@@ -94,7 +115,7 @@ Use `0 9 * * *` for once a day at 9am.
 
 ## Index new mail instantly
 
-For mail that should be searchable the moment it arrives, have a MailMate rule run `index-file` on each new message (see the [CLI reference](cli.md#index-file-path)). Keep the scheduled incremental run as well, to catch moves, archives and anything a rule misses.
+For mail that should be searchable the moment it arrives, have a MailMate rule run `index-file` on each new message (see the [CLI reference](cli.md#index-file-path)). Keep the scheduled incremental run as well, to catch moves, archives and anything a rule misses. If the server [indexes on its own](#index-inside-the-mcp-server), `index-file` skips instead, and the server picks the message up on its next pass.
 
 ## Housekeeping
 
