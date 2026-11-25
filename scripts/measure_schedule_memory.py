@@ -11,7 +11,8 @@ memory included), its peak so far, PyTorch's MPS memory and the Python heap.
 It stops with an error instead of printing a sample when a cycle doesn't
 embed what it should: a skipped or failed run, failed batches, a wrong indexed
 count, or models that aren't on Apple's GPU (pass --allow-cpu to measure there
-anyway). So a flat line always means the GPU did the work.
+anyway), or a search whose reranker didn't score every result on that
+device. So a flat line always means the GPU did the work.
 
 Never touches your real index: every path points into a temporary directory.
 Only the model cache is shared (read-only), so no download is needed if the
@@ -100,15 +101,33 @@ def fail(message: str) -> None:
     sys.exit(1)
 
 
-def search_once(rng: random.Random, resources) -> None:
-    """One interactive search: a query embedding and a rerank, random lengths."""
+def search_once(rng: random.Random, resources, device: str) -> None:
+    """One interactive search: a query embedding and a rerank, random lengths.
+
+    Fails unless the reranker really ran on `device`: every returned result
+    must carry a score from the model. `rerank` hands back unscored
+    candidates when it has no text to score (say RERANK_MAX_TEXT_CHARS=0),
+    and a sample taken then would measure nothing.
+    """
     query = " ".join(f"word{rng.randrange(5000)}" for _ in range(rng.randrange(1, 40)))
     resources.get_embedding_service().embed_query(query)
     candidates = [
         {"document": " ".join(f"word{rng.randrange(5000)}" for _ in range(rng.randrange(1, 400)))}
         for _ in range(rng.randint(1, 30))
     ]
-    resources.get_reranker().rerank(query, candidates, top_k=10)
+    reranker = resources.get_reranker()
+    reranker_device = reranker.model.device.type
+    if reranker_device != device:
+        fail(f"the reranker is on {reranker_device}, not {device}")
+    top_k = 10
+    ranked = reranker.rerank(query, candidates, top_k=top_k)
+    expected = min(top_k, len(candidates))
+    scored = [r for r in ranked if isinstance(r.get("rerank_score"), float)]
+    if len(ranked) != expected or len(scored) != expected:
+        fail(
+            f"the reranker scored {len(scored)} of {len(ranked)} results, expected "
+            f"{expected} scored (is RERANK_MAX_TEXT_CHARS 0?)"
+        )
 
 
 def main() -> None:
@@ -181,11 +200,13 @@ def main() -> None:
             fail(f"cycle {cycle}: the index run had failed batches ({summary!r})")
         if summary.get("indexed") != expected:
             fail(f"cycle {cycle}: indexed {summary.get('indexed')} emails, expected {expected}")
-        if not args.no_search:
-            search_once(rng, resources)
         device = resources.get_embedding_service().model.device.type
         if device != "mps" and not args.allow_cpu:
             fail(f"the embedding model is on {device}, not MPS (use --allow-cpu to measure anyway)")
+        if not args.no_search:
+            # The reranker must run where the embedder does: MPS, or with
+            # --allow-cpu whatever device the embedder landed on.
+            search_once(rng, resources, device)
         mps = mps_driver_bytes() / 2**20
         if mps == 0 and not args.allow_cpu:
             fail("PyTorch reports no MPS memory in use after an embedding run")

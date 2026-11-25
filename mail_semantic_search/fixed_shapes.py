@@ -81,13 +81,19 @@ def install(model: Any) -> None:
     if getattr(forward, "_fixed_shapes", False):
         return
     max_length = getattr(hf_model.config, "max_position_embeddings", None)
+    # Added token IDs must be the model's own pad ID: RoBERTa-family models
+    # (XLM-R, bge-reranker) number positions by counting non-pad IDs, so
+    # filling with 0 there runs past the position table.
+    pad_token_id = getattr(hf_model.config, "pad_token_id", None)
+    if pad_token_id is None:
+        pad_token_id = 0
 
     # Replace the instance's forward rather than registering module hooks:
     # sentence-transformers 5.4+ calls `model.forward(...)` directly, which
     # skips hooks. `wraps` keeps the signature it inspects to filter inputs.
     @functools.wraps(forward)
     def padded_forward(*args, **kwargs):
-        shape, args, kwargs = _pad(args, kwargs, max_length)
+        shape, args, kwargs = _pad(args, kwargs, max_length, pad_token_id)
         output = forward(*args, **kwargs)
         if shape is None:
             return output
@@ -97,8 +103,12 @@ def install(model: Any) -> None:
     hf_model.forward = padded_forward
 
 
-def _pad(args, kwargs, max_length):
-    """Pad the token tensors; returns (original and padded shape, args, kwargs)."""
+def _pad(args, kwargs, max_length, pad_token_id):
+    """Pad the token tensors; returns (original and padded shape, args, kwargs).
+
+    Added token IDs are `pad_token_id`, the attention mask is 0 over the
+    padding, and everything else (token type and position IDs) is 0.
+    """
     import torch
 
     reference = kwargs.get("input_ids")
@@ -115,7 +125,8 @@ def _pad(args, kwargs, max_length):
     def pad(tensor, name=None):
         if not isinstance(tensor, torch.Tensor) or tuple(tensor.shape[:2]) != (rows, length):
             return tensor
-        out = tensor.new_zeros((padded_rows, padded_length) + tuple(tensor.shape[2:]))
+        fill = pad_token_id if name == "input_ids" else 0
+        out = tensor.new_full((padded_rows, padded_length) + tuple(tensor.shape[2:]), fill)
         out[:rows, :length] = tensor
         if name == "attention_mask":
             # A row with nothing to attend to can produce NaNs; padded rows
@@ -123,7 +134,8 @@ def _pad(args, kwargs, max_length):
             out[rows:, 0] = 1
         return out
 
-    args = tuple(pad(a) for a in args)
+    # Positional args: the first is input_ids in every HF text model.
+    args = tuple(pad(a, "input_ids" if i == 0 else None) for i, a in enumerate(args))
     kwargs = {k: pad(v, k) for k, v in kwargs.items()}
     return (rows, length, padded_rows, padded_length), args, kwargs
 

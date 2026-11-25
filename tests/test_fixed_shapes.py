@@ -74,7 +74,7 @@ def cross_encoder_path(tmp_path_factory):
 def _record_shapes(model):
     """Collect (batch, length) of every input that reaches the BERT embeddings."""
     shapes = set()
-    embeddings = next(m for m in model.modules() if type(m).__name__ == "BertEmbeddings")
+    embeddings = next(m for m in model.modules() if type(m).__name__.endswith("Embeddings"))
     embeddings.register_forward_hook(
         lambda module, args, output: shapes.add(tuple(output.shape[:2]))
     )
@@ -146,3 +146,64 @@ def test_services_install_only_on_mps(monkeypatch):
         EmbeddingService()
         CrossEncoderReranker()
         assert len(installed) == 2 * expected
+
+
+def _save_tiny_xlm_roberta(path):
+    """XLM-RoBERTa-style model: pad ID 1, position IDs counted from non-pad IDs.
+
+    The tokenizer has XLM-R's special tokens and pair template but one token
+    per character, so a text's token count is easy to control.
+    """
+    from tokenizers import Regex, Tokenizer, models, pre_tokenizers, processors
+    from transformers import PreTrainedTokenizerFast, XLMRobertaConfig, XLMRobertaForSequenceClassification
+
+    vocab = {"<s>": 0, "<pad>": 1, "</s>": 2, "<unk>": 3, "<mask>": 4}
+    for code in range(32, 127):
+        vocab.setdefault(chr(code), len(vocab))
+    backend = Tokenizer(models.WordLevel(vocab, unk_token="<unk>"))
+    backend.pre_tokenizer = pre_tokenizers.Split(Regex("."), "isolated")
+    backend.post_processor = processors.TemplateProcessing(
+        single="<s> $A </s>",
+        pair="<s> $A </s> </s> $B </s>",
+        special_tokens=[("<s>", 0), ("</s>", 2)],
+    )
+    tokenizer = PreTrainedTokenizerFast(
+        tokenizer_object=backend, bos_token="<s>", eos_token="</s>", cls_token="<s>",
+        sep_token="</s>", pad_token="<pad>", unk_token="<unk>", mask_token="<mask>",
+        model_max_length=512,
+    )
+    assert tokenizer.pad_token_id == 1
+    torch.manual_seed(0)
+    config = XLMRobertaConfig(
+        vocab_size=len(vocab), hidden_size=32, num_hidden_layers=2, num_attention_heads=2,
+        intermediate_size=64, max_position_embeddings=514, pad_token_id=1,
+        bos_token_id=0, eos_token_id=2, type_vocab_size=1, num_labels=1,
+    )
+    XLMRobertaForSequenceClassification(config).save_pretrained(path)
+    tokenizer.save_pretrained(path)
+    return str(path)
+
+
+def test_pads_with_the_models_pad_token_id(tmp_path):
+    """A 129-token input pads to 514 on a pad-ID-1 model without overrunning positions."""
+    path = _save_tiny_xlm_roberta(tmp_path)
+    plain = st.CrossEncoder(path, device="cpu")
+    padded = st.CrossEncoder(path, device="cpu")
+    fixed_shapes.install(padded)
+    shapes = _record_shapes(padded)
+
+    def tokens(pair):
+        return len(plain.tokenizer(*pair)["input_ids"])
+
+    # 129 tokens: one past the short bucket, so it pads to the 514-entry max.
+    long_pair = ("q", "x" * 124)
+    assert tokens(long_pair) == 129
+    # A partial batch (3 rows -> 4) mixing short and boundary-length inputs.
+    pairs = [long_pair, ("q", "short"), ("q", "y" * 500)]
+    np.testing.assert_allclose(
+        padded.predict(pairs), plain.predict(pairs), rtol=1e-4, atol=1e-5
+    )
+    np.testing.assert_allclose(
+        padded.predict([("q", "hi")]), plain.predict([("q", "hi")]), rtol=1e-4, atol=1e-5
+    )
+    assert shapes == {(4, 514), (1, 128)}
