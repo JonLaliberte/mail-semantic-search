@@ -30,6 +30,7 @@ import ctypes
 import gc
 import os
 import random
+import statistics
 import sys
 import tempfile
 import time
@@ -148,6 +149,12 @@ def main() -> None:
         "--no-search", action="store_true", help="Skip the search + rerank done each cycle."
     )
     parser.add_argument(
+        "--no-padding", action="store_true", help="Disable MPS fixed-shape padding for comparison."
+    )
+    parser.add_argument(
+        "--no-cache-clear", action="store_true", help="Disable explicit post-index and idle cache clears."
+    )
+    parser.add_argument(
         "--allow-cpu",
         action="store_true",
         help="Measure even when the models are not on Apple's GPU (MPS). Without "
@@ -161,14 +168,33 @@ def main() -> None:
         EMAIL_DIR=str(mail_dir),
         DATABASE_PATH=str(work / "database.db"),
         CHROMADB_PATH=str(work / "chromadb"),
+        LOG_PATH=str(work / "application.log"),
         INCREMENTAL_OVERLAP_SECONDS="0",
+        PYTHON_DOTENV_DISABLED="1",
     )
     os.environ.setdefault("MODEL_CACHE_DIR", str(work / "models"))
     write_emails(mail_dir, 0, args.seed_emails)
 
-    from mail_semantic_search import resources
+    import torch
+
+    from mail_semantic_search import fixed_shapes, resources
     from mail_semantic_search.index_lock import IndexLock
     from mail_semantic_search.index_schedule import IndexScheduler
+
+    if args.no_padding:
+        fixed_shapes.install = lambda *_: None
+    if args.no_cache_clear:
+        resources.clear_mps_cache_when_idle = lambda: None
+
+    cache_clear_ms = []
+    empty_cache = torch.mps.empty_cache
+
+    def timed_empty_cache():
+        started = time.perf_counter()
+        empty_cache()
+        cache_clear_ms.append((time.perf_counter() - started) * 1000)
+
+    torch.mps.empty_cache = timed_empty_cache
 
     scheduler = IndexScheduler(
         interval=300, first_delay=0, notifier=lambda *_: None, lock=IndexLock()
@@ -176,11 +202,15 @@ def main() -> None:
     rng = random.Random(0)
     tracemalloc.start()
     print(f"workdir: {work}")
+    print(f"torch {torch.__version__}, padding={not args.no_padding}, cache clear={not args.no_cache_clear}")
     print(
         "cycle  indexed  footprint_MB  delta_MB  peak_MB  mps_driver_MB  py_heap_MB  seconds"
     )
     baseline = None
     samples = []
+    driver_samples = []
+    peak_samples = []
+    post_index_clear_ms = []
     next_id = args.seed_emails
     expected = args.seed_emails
     for cycle in range(args.cycles + 1):
@@ -192,7 +222,9 @@ def main() -> None:
             write_emails(mail_dir, next_id, expected)
             next_id += expected
         started = time.monotonic()
+        n_clears = len(cache_clear_ms)
         summary = scheduler.run_once()
+        post_index_clear_ms.extend(cache_clear_ms[n_clears:])
         # A skipped or failed pass embeds nothing, so its memory says nothing.
         if not summary or not summary.get("ran"):
             fail(f"cycle {cycle}: the index run was skipped or raised ({summary!r})")
@@ -203,6 +235,8 @@ def main() -> None:
         device = resources.get_embedding_service().model.device.type
         if device != "mps" and not args.allow_cpu:
             fail(f"the embedding model is on {device}, not MPS (use --allow-cpu to measure anyway)")
+        if device == "mps" and len(cache_clear_ms) - n_clears != int(not args.no_cache_clear):
+            fail(f"cycle {cycle}: unexpected number of post-index MPS cache clears")
         if not args.no_search:
             # The reranker must run where the embedder does: MPS, or with
             # --allow-cpu whatever device the embedder landed on.
@@ -219,6 +253,8 @@ def main() -> None:
             baseline = footprint
         if cycle:
             samples.append(footprint)
+            driver_samples.append(mps)
+            peak_samples.append(peak)
         delta = "" if baseline is None else f"{footprint - baseline:+8.0f}"
         print(
             f"{cycle:5d}  {summary['indexed']:7d}  {footprint:12.0f}  {delta:>8}  "
@@ -230,6 +266,21 @@ def main() -> None:
         print(
             f"growth over the second half of the cycles: "
             f"{samples[-1] - samples[half]:+.0f} MB (a leak keeps this well above 0)"
+        )
+    if samples:
+        print(
+            f"footprint first/final/peak/median MiB: {samples[0]:.0f} / "
+            f"{samples[-1]:.0f} / {max(peak_samples):.0f} / {statistics.median(samples):.0f}"
+        )
+        print(f"median MPS driver memory: {statistics.median(driver_samples):.0f} MiB")
+    if post_index_clear_ms:
+        p50 = statistics.median(post_index_clear_ms)
+        p95 = p50
+        if len(post_index_clear_ms) > 1:
+            p95 = statistics.quantiles(post_index_clear_ms, n=100, method="inclusive")[94]
+        print(
+            f"post-index empty_cache() (including seed), n={len(post_index_clear_ms)}: "
+            f"p50 {p50:.2f} ms, p95 {p95:.2f} ms, max {max(post_index_clear_ms):.2f} ms"
         )
 
 

@@ -10,8 +10,9 @@ Ground rules:
 
 ## 1. Check prerequisites
 
-- OS: macOS is the main target. Linux works for indexing, search and MCP; the MailMate actions are macOS only.
-- Python 3.10 or newer: `python3 --version`. If it's missing or too old on macOS, offer `brew install python@3.12` (Homebrew) and use that interpreter (e.g. `/opt/homebrew/bin/python3.12`) in step 3.
+- OS: macOS is the main target. Linux works for indexing, search and MCP. The MailMate actions are macOS only.
+- On Apple Silicon, check `sw_vers -productVersion`. The native install needs macOS 14 or newer for the PyTorch 2.15 wheel. macOS 14 uses the CPU, and MPS acceleration requires macOS 15 or newer. On macOS 13 or older, pip cannot resolve the wheel. Offer Docker if the host supports it, or a macOS upgrade.
+- Python 3.11 or newer on Apple Silicon, and 3.10 or newer elsewhere. Check with `python3 --version`. If it's missing or too old on macOS, offer `brew install python@3.12` (Homebrew) and use that interpreter (e.g. `/opt/homebrew/bin/python3.12`) in step 3.
 - `git --version`.
 - Memory: 16 GB+ RAM recommended (`sysctl -n hw.memsize` on macOS). Note it to the user if lower, but continue.
 

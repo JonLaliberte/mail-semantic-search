@@ -67,8 +67,17 @@ class _ResourceUseMiddleware(Middleware):
     async def on_call_tool(self, context, call_next):
         # Off the event loop: taking the lock can open SQLite and wait on it.
         await anyio.to_thread.run_sync(index_schedule.ensure_index_available)
-        with resources.in_use():
+        use = resources.in_use()
+        # Enter can wait for a clear holding the resource lock. Exit can
+        # perform a deferred clear itself when this is the last active tool.
+        with anyio.CancelScope(shield=True):
+            await anyio.to_thread.run_sync(use.__enter__)
+        try:
             return await call_next(context)
+        finally:
+            exc_info = sys.exc_info()
+            with anyio.CancelScope(shield=True):
+                await anyio.to_thread.run_sync(use.__exit__, *exc_info)
 
 
 mcp.add_middleware(_ResourceUseMiddleware())

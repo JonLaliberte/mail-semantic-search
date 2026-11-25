@@ -231,7 +231,9 @@ def _scheduler(runner, notifier=_no_alerts, interval=300, **kw):
     return index_schedule.IndexScheduler(interval, run_index=runner, notifier=notifier, **kw)
 
 
-def test_run_once_runs_an_incremental_pass_with_the_shared_model(marks):
+def test_run_once_runs_an_incremental_pass_with_the_shared_model(marks, monkeypatch):
+    clears = []
+    monkeypatch.setattr(resources, "clear_mps_cache_when_idle", lambda: clears.append(1))
     runner = _Runner(_ok(indexed=3))
     scheduler = _scheduler(runner)
 
@@ -243,18 +245,22 @@ def test_run_once_runs_an_incremental_pass_with_the_shared_model(marks):
     assert kwargs["should_stop"]() is False
     # The run holds the models against idle release, and is over afterwards.
     assert runner.indexing_seen == [1]
+    assert clears == [1]
     assert resources._indexing == 0
     assert marks == [1]
     assert scheduler.lock.held
     scheduler.lock.release()
 
 
-def test_failures_notify_once_until_a_run_succeeds(marks):
+def test_failures_notify_once_until_a_run_succeeds(marks, monkeypatch):
+    clears = []
+    monkeypatch.setattr(resources, "clear_mps_cache_when_idle", lambda: clears.append(1))
     alerts = []
     runner = _Runner(RuntimeError("boom"), FAILED_BATCHES, _ok(), RuntimeError("again"))
     scheduler = _scheduler(runner, notifier=lambda title, msg: alerts.append(msg))
 
     assert scheduler.run_once() is None  # exception never escapes
+    assert clears == [1]
     scheduler.run_once()  # still failing: no second alert
     assert alerts == ["RuntimeError: boom"]
     scheduler.run_once()  # recovers

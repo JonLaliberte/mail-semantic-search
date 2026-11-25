@@ -1,8 +1,8 @@
 """On MPS, model inputs must come in a small fixed set of shapes.
 
-PyTorch's MPS backend keeps GPU memory for every distinct input shape and
-never returns it, so variable-shaped batches leak (17 GB over 12 days in a
-long-running MCP server). These tests build a tiny BERT on disk and run it
+PyTorch's MPS backend caches GPU resources by input shape. On PyTorch 2.10
+the cache retained 17 GB after 12 days in a long-running MCP server.
+These tests build a tiny BERT on disk and run it
 through the installed sentence-transformers' real `encode()` / `predict()`, so
 they check the tensors that actually reach the forward pass on whatever
 version is installed. They run on CPU; `install` is the same code on MPS.

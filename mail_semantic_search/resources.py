@@ -34,6 +34,7 @@ _active = 0
 # Scheduled index runs in progress. They hold the shared model without
 # counting as tool calls, so they keep it loaded but don't reset the idle timer.
 _indexing = 0
+_mps_cache_clear_pending = False
 _last_used = time.monotonic()
 _embedding_service: Optional[EmbeddingService] = None
 _reranker: Optional[CrossEncoderReranker] = None
@@ -88,6 +89,7 @@ def in_use() -> Iterator[None]:
             global _last_used
             _active -= 1
             _last_used = time.monotonic()
+            _clear_mps_cache_if_idle_locked()
 
 
 def _open_keepalive_locked() -> None:
@@ -124,6 +126,31 @@ def indexing() -> Iterator[None]:
     finally:
         with _lock:
             _indexing -= 1
+            _clear_mps_cache_if_idle_locked()
+
+
+def clear_mps_cache_when_idle() -> None:
+    """Clear unused MPS allocations as soon as index runs and tool calls finish."""
+    global _mps_cache_clear_pending
+    with _lock:
+        _mps_cache_clear_pending = True
+        _clear_mps_cache_if_idle_locked()
+
+
+def _clear_mps_cache_if_idle_locked() -> None:
+    global _mps_cache_clear_pending
+    if not _mps_cache_clear_pending or _active or _indexing:
+        return
+    _mps_cache_clear_pending = False
+
+    # PyTorch 2.15 also evicts MPSGraph objects. A concurrent inference
+    # could still be using one, so hold _lock to keep new requests out.
+    torch = sys.modules.get("torch")
+    if torch is not None and torch.backends.mps.is_available():
+        try:
+            torch.mps.empty_cache()
+        except Exception:
+            logger.exception("Could not clear the MPS cache")
 
 
 def mark_index_current() -> None:
@@ -157,10 +184,7 @@ def release_if_idle(idle_seconds: float) -> bool:
             store.close()
 
     gc.collect()
-    torch = sys.modules.get("torch")
-    if torch is not None and torch.backends.mps.is_available():
-        # Best effort: MPS hands back only part of what the models used.
-        torch.mps.empty_cache()
+    clear_mps_cache_when_idle()
     logger.info("Released vector index and models after %ss idle", idle_seconds)
     return True
 

@@ -63,8 +63,7 @@ class EmbeddingService:
             self.model = load_model_local_first(
                 SentenceTransformer, self.model_name, cache_folder=cache_dir
             )
-        # On Apple's GPU every new input shape costs memory that is never
-        # returned, so pad to a few fixed shapes (see fixed_shapes.py).
+        # Bound the number of input shapes cached by Apple's GPU backend.
         if fixed_shapes.uses_mps(self.model):
             fixed_shapes.install(self.model)
         logger.info(

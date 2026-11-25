@@ -191,6 +191,7 @@ class IndexScheduler:
                     # Batches committed before the failure are in the loaded
                     # index too.
                     resources.mark_index_current()
+                    resources.clear_mps_cache_when_idle()
                     raise
                 if summary.get("ran"):
                     # This process wrote into the index it has loaded, so the
@@ -200,6 +201,7 @@ class IndexScheduler:
                     # A skipped run must not mark: whoever holds the job lock
                     # may be writing from outside this process.
                     resources.mark_index_current()
+                    resources.clear_mps_cache_when_idle()
         except Exception as exc:
             logger.exception("Scheduled index run failed")
             self._report_failure(f"{type(exc).__name__}: {exc}")
