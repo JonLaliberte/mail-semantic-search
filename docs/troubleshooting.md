@@ -32,6 +32,7 @@ Internal warnings and tracebacks go to `LOG_PATH` (default `./data/logs/mail-sem
 **The server uses several GB of memory**
 - That's the vector index, which ChromaDB keeps entirely in RAM while loaded. The server releases it after `MCP_IDLE_UNLOAD_SECONDS` (default 10 minutes) of inactivity.
 - If `compact-vectors --dry-run` shows the index is much bigger than its expected size, run `compact-vectors` to drop dead vectors.
+- If memory keeps climbing over days (tens of GB in Activity Monitor) on a Mac, upgrade. Versions before the fix leaked GPU memory with every batch of new mail embedded on Apple's GPU. Restarting the server frees it.
 
 **Claude shows zero indexed emails, but CLI search works**
 - The MCP server is reading a different data folder. Make sure the configured command `cd`s into the project folder, so it picks up the same `.env`.

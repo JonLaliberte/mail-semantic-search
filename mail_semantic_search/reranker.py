@@ -8,6 +8,11 @@ from typing import Dict, List
 from sentence_transformers import CrossEncoder
 
 from mail_semantic_search.config import config
+from mail_semantic_search.fixed_shapes import (
+    pad_cross_encoder_to_max_length,
+    padded_batch,
+    uses_mps,
+)
 from mail_semantic_search.model_loader import load_model_local_first
 from mail_semantic_search.runtime_logging import (
     LoggerWriter,
@@ -16,6 +21,10 @@ from mail_semantic_search.runtime_logging import (
 )
 
 logger = logging.getLogger(__name__)
+
+# CrossEncoder.predict's default; on MPS the batch is padded up to a power of
+# two no larger than this (see fixed_shapes.py).
+PREDICT_BATCH_SIZE = 32
 
 
 class CrossEncoderReranker:
@@ -34,6 +43,10 @@ class CrossEncoderReranker:
                 config.reranker_model,
                 cache_folder=cache_dir,
             )
+        # Same reason as EmbeddingService: bound the input shapes on MPS.
+        self._fixed_shapes = uses_mps(self.model)
+        if self._fixed_shapes:
+            pad_cross_encoder_to_max_length(self.model)
 
     def rerank(self, query: str, candidates: List[Dict], top_k: int) -> List[Dict]:
         """Rerank candidates and return top_k results."""
@@ -52,7 +65,11 @@ class CrossEncoderReranker:
         if not pairs:
             return candidates[:top_k]
 
-        scores = self.model.predict(pairs)
+        batch_size = PREDICT_BATCH_SIZE
+        padded = pairs
+        if self._fixed_shapes:
+            padded, batch_size = padded_batch(pairs, PREDICT_BATCH_SIZE, (query, ""))
+        scores = self.model.predict(padded, batch_size=batch_size)[: len(pairs)]
         scored = []
         for item, score in zip(working, scores):
             updated = dict(item)

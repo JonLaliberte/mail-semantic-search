@@ -204,6 +204,14 @@ Measured on 703k vectors (Apple Silicon, 2026-10-03): index 4.56 GB → 2.26 GB,
 
 Don't expect model memory back on Apple Silicon: after dropping the models and calling `torch.mps.empty_cache()`, the MPS driver keeps most of what it allocated. The idle saving is the index.
 
+## Fixed input shapes on MPS
+
+PyTorch's MPS backend keeps GPU memory for every distinct input shape it runs, and `torch.mps.empty_cache()` doesn't return it. sentence-transformers pads each batch only to its longest text, and the last batch of a call is whatever is left over, so almost every batch of real mail is a new shape. A server indexing every 5 minutes reached 17 GB of `IOAccelerator (graphics)` in `vmmap --summary` after 12 days (2026-11-25), and 120 random-length batches in isolation go from 2 GB to 14 GB.
+
+`fixed_shapes.py` bounds the shapes when the model is on MPS: sequences pad to the model's max length, and batches pad with empty inputs up to a power of two (at most 6 shapes at batch size 32). `EmbeddingService` and `CrossEncoderReranker` both apply it. Embeddings are unchanged, because attention masks hide the padding. CPU and CUDA skip it. Any new code path that runs a model on MPS has to go through the same padding, or the leak comes back.
+
+`scripts/measure_schedule_memory.py` runs scheduled index cycles in one process against a throwaway maildir and prints the physical footprint and MPS driver memory for each cycle. Memory should level off after the first ~10 cycles.
+
 ## One process per index (MCP_INDEX_INTERVAL_SECONDS)
 
 Chroma's local `PersistentClient` is not multi-process safe, and opening it is not read-only: it rewrites `chroma.sqlite3`, and a query applies pending log entries (`embeddings_queue`) to the metadata and HNSW segments. A long-lived HTTP server plus a separate `index --incremental` every 5 minutes therefore had two processes applying the same log. That is the leading suspect for the FTS5 corruption seen twice in October and November 2026 (the second one surfaced as `Failed to apply logs to the metadata segment`). Chroma is thread-safe inside one process, so the fix is one process, not one thread.
