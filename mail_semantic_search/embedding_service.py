@@ -10,11 +10,7 @@ from sentence_transformers import SentenceTransformer
 from transformers.utils import logging as transformers_logging
 
 from mail_semantic_search.config import config
-from mail_semantic_search.fixed_shapes import (
-    pad_sentence_transformer_to_max_length,
-    padded_batch,
-    uses_mps,
-)
+from mail_semantic_search import fixed_shapes
 from mail_semantic_search.model_loader import load_model_local_first
 from mail_semantic_search.runtime_logging import (
     LoggerWriter,
@@ -23,10 +19,6 @@ from mail_semantic_search.runtime_logging import (
 )
 
 logger = logging.getLogger(__name__)
-
-# sentence-transformers' default; on MPS the batch is padded up to a power of
-# two no larger than this (see fixed_shapes.py).
-ENCODE_BATCH_SIZE = 32
 
 # Human-friendly aliases documented in README -> canonical HF model IDs.
 MODEL_ALIASES = {
@@ -73,9 +65,8 @@ class EmbeddingService:
             )
         # On Apple's GPU every new input shape costs memory that is never
         # returned, so pad to a few fixed shapes (see fixed_shapes.py).
-        self._fixed_shapes = uses_mps(self.model)
-        if self._fixed_shapes:
-            pad_sentence_transformer_to_max_length(self.model)
+        if fixed_shapes.uses_mps(self.model):
+            fixed_shapes.install(self.model)
         logger.info(
             "Model loaded successfully. Embedding dimension: %s",
             self.model.get_sentence_embedding_dimension(),
@@ -85,22 +76,13 @@ class EmbeddingService:
         """Generate embeddings for a list of texts."""
         if not texts:
             return []
-        return self._encode(texts).tolist()
+        with self._encode_lock:
+            return self.model.encode(texts, show_progress_bar=False).tolist()
 
     def embed_query(self, query: str) -> List[float]:
         """Generate embedding for a single query."""
-        return self._encode([query])[0].tolist()
-
-    def _encode(self, texts: List[str]):
-        count = len(texts)
-        batch_size = ENCODE_BATCH_SIZE
-        if self._fixed_shapes:
-            texts, batch_size = padded_batch(texts, ENCODE_BATCH_SIZE, "")
         with self._encode_lock:
-            embeddings = self.model.encode(
-                texts, batch_size=batch_size, show_progress_bar=False
-            )
-        return embeddings[:count]
+            return self.model.encode([query], show_progress_bar=False)[0].tolist()
 
     def get_embedding_dimension(self) -> int:
         """Get the dimension of embeddings produced by this model."""

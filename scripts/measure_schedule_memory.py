@@ -2,10 +2,16 @@
 
 Runs the MCP server's scheduled incremental index (`IndexScheduler.run_once`)
 several times in one process against a throwaway maildir, database and Chroma
-directory, a few new emails per cycle. After each run it lets the idle reaper
+directory, a few new emails per cycle, then one search (a query embedding and
+a rerank of random-length candidates). After each cycle it lets the idle reaper
 do what it does in the server (`release_if_idle`), then prints the process's
 physical footprint (what Activity Monitor and `vmmap --summary` report, GPU
-memory included) and the Python heap (tracemalloc).
+memory included), its peak so far, PyTorch's MPS memory and the Python heap.
+
+It stops with an error instead of printing a sample when a cycle doesn't
+embed what it should: a skipped or failed run, failed batches, a wrong indexed
+count, or models that aren't on Apple's GPU (pass --allow-cpu to measure there
+anyway). So a flat line always means the GPU did the work.
 
 Never touches your real index: every path points into a temporary directory.
 Only the model cache is shared (read-only), so no download is needed if the
@@ -30,30 +36,36 @@ import tracemalloc
 from pathlib import Path
 
 
-def physical_footprint() -> int:
-    """Bytes of physical footprint (macOS); falls back to max RSS elsewhere."""
+def memory_footprint() -> tuple:
+    """(current, lifetime peak) physical footprint in bytes, as vmmap reports it.
+
+    macOS only (proc_pid_rusage, RUSAGE_INFO_V4); elsewhere both are max RSS.
+    """
     if sys.platform == "darwin":
+        names = (
+            "user_time system_time pkg_idle_wkups interrupt_wkups pageins wired_size "
+            "resident_size phys_footprint proc_start_abstime proc_exit_abstime "
+            "child_user_time child_system_time child_pkg_idle_wkups "
+            "child_interrupt_wkups child_pageins child_elapsed_abstime "
+            "diskio_bytesread diskio_byteswritten cpu_time_qos_default "
+            "cpu_time_qos_maintenance cpu_time_qos_background cpu_time_qos_utility "
+            "cpu_time_qos_legacy cpu_time_qos_user_initiated "
+            "cpu_time_qos_user_interactive billed_system_time serviced_system_time "
+            "logical_writes lifetime_max_phys_footprint instructions cycles "
+            "billed_energy serviced_energy interval_max_phys_footprint runnable_time"
+        ).split()
 
-        class RusageInfoV2(ctypes.Structure):
-            _fields_ = [("ri_uuid", ctypes.c_uint8 * 16)] + [
-                (name, ctypes.c_uint64)
-                for name in (
-                    "ri_user_time ri_system_time ri_pkg_idle_wkups ri_interrupt_wkups "
-                    "ri_pageins ri_wired_size ri_resident_size ri_phys_footprint "
-                    "ri_proc_start_abstime ri_proc_exit_abstime ri_child_user_time "
-                    "ri_child_system_time ri_child_pkg_idle_wkups ri_child_interrupt_wkups "
-                    "ri_child_pageins ri_child_elapsed_abstime ri_diskio_bytesread "
-                    "ri_diskio_byteswritten"
-                ).split()
-            ]
+        class RusageInfoV4(ctypes.Structure):
+            _fields_ = [("uuid", ctypes.c_uint8 * 16)] + [(n, ctypes.c_uint64) for n in names]
 
+        info = RusageInfoV4()
         libc = ctypes.CDLL("libc.dylib")
-        info = RusageInfoV2()
-        if libc.proc_pid_rusage(os.getpid(), 2, ctypes.byref(info)) == 0:
-            return info.ri_phys_footprint
+        if libc.proc_pid_rusage(os.getpid(), 4, ctypes.byref(info)) == 0:
+            return info.phys_footprint, info.lifetime_max_phys_footprint
     import resource
 
-    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
+    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
+    return rss, rss
 
 
 def mps_driver_bytes() -> int:
@@ -83,6 +95,22 @@ def write_emails(mail_dir: Path, start: int, count: int) -> None:
         )
 
 
+def fail(message: str) -> None:
+    print(f"FAILED: {message}", file=sys.stderr, flush=True)
+    sys.exit(1)
+
+
+def search_once(rng: random.Random, resources) -> None:
+    """One interactive search: a query embedding and a rerank, random lengths."""
+    query = " ".join(f"word{rng.randrange(5000)}" for _ in range(rng.randrange(1, 40)))
+    resources.get_embedding_service().embed_query(query)
+    candidates = [
+        {"document": " ".join(f"word{rng.randrange(5000)}" for _ in range(rng.randrange(1, 400)))}
+        for _ in range(rng.randint(1, 30))
+    ]
+    resources.get_reranker().rerank(query, candidates, top_k=10)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--cycles", type=int, default=20)
@@ -96,6 +124,15 @@ def main() -> None:
         default=0.0,
         help="Idle timeout given to release_if_idle after each run (0 = due at once, "
         "like the server's 600s timeout after a 5-minute interval).",
+    )
+    parser.add_argument(
+        "--no-search", action="store_true", help="Skip the search + rerank done each cycle."
+    )
+    parser.add_argument(
+        "--allow-cpu",
+        action="store_true",
+        help="Measure even when the models are not on Apple's GPU (MPS). Without "
+        "it the script stops, since the GPU leak can't show up on CPU.",
     )
     args = parser.parse_args()
 
@@ -117,34 +154,61 @@ def main() -> None:
     scheduler = IndexScheduler(
         interval=300, first_delay=0, notifier=lambda *_: None, lock=IndexLock()
     )
+    rng = random.Random(0)
     tracemalloc.start()
     print(f"workdir: {work}")
-    print("cycle  indexed  footprint_MB  delta_MB  mps_driver_MB  py_heap_MB  seconds")
+    print(
+        "cycle  indexed  footprint_MB  delta_MB  peak_MB  mps_driver_MB  py_heap_MB  seconds"
+    )
     baseline = None
+    samples = []
     next_id = args.seed_emails
+    expected = args.seed_emails
     for cycle in range(args.cycles + 1):
         if cycle:
             # mtime/ctime granularity: make the new files strictly newer
             # than the watermark the previous run recorded.
             time.sleep(1.1)
-            count = random.Random(cycle).randint(1, args.emails_per_cycle)
-            write_emails(mail_dir, next_id, count)
-            next_id += count
+            expected = random.Random(cycle).randint(1, args.emails_per_cycle)
+            write_emails(mail_dir, next_id, expected)
+            next_id += expected
         started = time.monotonic()
-        summary = scheduler.run_once() or {}
+        summary = scheduler.run_once()
+        # A skipped or failed pass embeds nothing, so its memory says nothing.
+        if not summary or not summary.get("ran"):
+            fail(f"cycle {cycle}: the index run was skipped or raised ({summary!r})")
+        if summary.get("batch_failures") or summary.get("interrupted"):
+            fail(f"cycle {cycle}: the index run had failed batches ({summary!r})")
+        if summary.get("indexed") != expected:
+            fail(f"cycle {cycle}: indexed {summary.get('indexed')} emails, expected {expected}")
+        if not args.no_search:
+            search_once(rng, resources)
+        device = resources.get_embedding_service().model.device.type
+        if device != "mps" and not args.allow_cpu:
+            fail(f"the embedding model is on {device}, not MPS (use --allow-cpu to measure anyway)")
+        mps = mps_driver_bytes() / 2**20
+        if mps == 0 and not args.allow_cpu:
+            fail("PyTorch reports no MPS memory in use after an embedding run")
         resources.release_if_idle(args.idle_seconds)
         gc.collect()
-        footprint = physical_footprint() / 2**20
-        mps = mps_driver_bytes() / 2**20
+        footprint, peak = (b / 2**20 for b in memory_footprint())
         heap = tracemalloc.get_traced_memory()[0] / 2**20
         if cycle == 1:
             # Cycle 0 indexes the seed mailbox; measure growth from cycle 1.
             baseline = footprint
+        if cycle:
+            samples.append(footprint)
         delta = "" if baseline is None else f"{footprint - baseline:+8.0f}"
         print(
-            f"{cycle:5d}  {summary.get('indexed', 0):7d}  {footprint:12.0f}  "
-            f"{delta:>8}  {mps:13.0f}  {heap:10.1f}  {time.monotonic() - started:7.1f}",
+            f"{cycle:5d}  {summary['indexed']:7d}  {footprint:12.0f}  {delta:>8}  "
+            f"{peak:7.0f}  {mps:13.0f}  {heap:10.1f}  {time.monotonic() - started:7.1f}",
             flush=True,
+        )
+    if len(samples) >= 4:
+        half = len(samples) // 2
+        print(
+            f"growth over the second half of the cycles: "
+            f"{samples[-1] - samples[half]:+.0f} MB (a leak keeps this well above 0)"
         )
 
 
