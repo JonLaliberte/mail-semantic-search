@@ -15,6 +15,7 @@ Find any email you've ever received by describing it. "The lease renewal the lan
 - macOS (Linux works for search and indexing; the MailMate actions are macOS only)
 - [MailMate](https://freron.com), or any folder of `.eml` files
 - Python 3.11+ on Apple Silicon, Python 3.10+ elsewhere, or Docker
+- Native Apple Silicon installs require macOS 14+. MPS acceleration requires macOS 15+.
 - 16 GB RAM recommended; about 2.5 GB of disk per 35 GB of mail
 
 ## Install

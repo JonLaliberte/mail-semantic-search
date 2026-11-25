@@ -252,12 +252,15 @@ def test_run_once_runs_an_incremental_pass_with_the_shared_model(marks, monkeypa
     scheduler.lock.release()
 
 
-def test_failures_notify_once_until_a_run_succeeds(marks):
+def test_failures_notify_once_until_a_run_succeeds(marks, monkeypatch):
+    clears = []
+    monkeypatch.setattr(resources, "clear_mps_cache_when_idle", lambda: clears.append(1))
     alerts = []
     runner = _Runner(RuntimeError("boom"), FAILED_BATCHES, _ok(), RuntimeError("again"))
     scheduler = _scheduler(runner, notifier=lambda title, msg: alerts.append(msg))
 
     assert scheduler.run_once() is None  # exception never escapes
+    assert clears == [1]
     scheduler.run_once()  # still failing: no second alert
     assert alerts == ["RuntimeError: boom"]
     scheduler.run_once()  # recovers

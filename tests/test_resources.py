@@ -1,6 +1,7 @@
 """Tests for sharing the models/index across MCP calls and releasing them when idle."""
 
 import asyncio
+import threading
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -134,6 +135,57 @@ def test_release_never_happens_mid_request():
     with resources.in_use():
         assert resources.release_if_idle(0) is False
     assert _FakeStore.closed == 0
+
+
+@pytest.fixture
+def mps_cache(monkeypatch):
+    cache = Mock()
+    torch = SimpleNamespace(
+        backends=SimpleNamespace(mps=SimpleNamespace(is_available=lambda: True)),
+        mps=SimpleNamespace(empty_cache=cache),
+    )
+    monkeypatch.setitem(resources.sys.modules, "torch", torch)
+    return cache
+
+
+def test_idle_release_clears_mps_cache_once(mps_cache):
+    with resources.in_use():
+        resources.get_embedding_service()
+    assert resources.release_if_idle(0)
+    mps_cache.assert_called_once_with()
+    assert not resources.release_if_idle(0)
+    mps_cache.assert_called_once_with()
+
+
+def test_deferred_mcp_cache_clear_runs_off_event_loop(mps_cache, monkeypatch):
+    import anyio
+
+    from mail_semantic_search import mcp_server
+
+    monkeypatch.setattr(mcp_server.index_schedule, "ensure_index_available", lambda: None)
+    event_loop_thread = threading.get_ident()
+    clear_threads = []
+
+    def record_clear():
+        clear_threads.append(threading.get_ident())
+
+    mps_cache.side_effect = record_clear
+
+    async def call():
+        with anyio.CancelScope() as scope:
+            async def tool(_):
+                resources.clear_mps_cache_when_idle()
+                mps_cache.assert_not_called()
+                scope.cancel()
+                await anyio.sleep_forever()
+
+            await mcp_server._ResourceUseMiddleware().on_call_tool(None, tool)
+        assert scope.cancelled_caught
+
+    asyncio.run(call())
+    assert len(clear_threads) == 1
+    assert clear_threads[0] != event_loop_thread
+    assert resources._active == 0
 
 
 @pytest.mark.parametrize("mps_available", [True, False])

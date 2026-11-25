@@ -12,7 +12,8 @@ There are two ways to run mail-semantic-search. Both read the same `.env` and ca
 ## Requirements
 
 - macOS or Linux (developed and tested on macOS). The MailMate actions (`open_email`, `archive_email` and so on) are macOS only.
-- Native Apple Silicon installs use PyTorch 2.15. GPU acceleration (MPS) requires macOS 15 or newer.
+- Native Apple Silicon installs require macOS 14 or newer because PyTorch 2.15 publishes `macosx_14_0_arm64` wheels. On macOS 13 or older, pip cannot resolve the required PyTorch wheel. Use Docker if your macOS version supports it, or upgrade macOS.
+- On macOS 14, the native app runs on the CPU. GPU acceleration (MPS) requires macOS 15 or newer.
 - An email client that stores messages as `.eml` files. MailMate is the main target; inbox listing and deep links assume MailMate's folder layout.
 - 16 GB+ RAM recommended. 8 GB may work for small archives. Apple Silicon or modern x86_64. Tested on a Mac Mini M4 with 24 GB.
 - Disk for the index: roughly **2.5 GB per 35 GB of email** (~700k messages), split across embeddings (~2.1 GB), model files (~420 MB) and metadata (~100–200 MB).
