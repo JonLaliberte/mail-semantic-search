@@ -4,7 +4,7 @@ There are two ways to run mail-semantic-search. Both read the same `.env` and ca
 
 | | Native (Python venv) | Docker |
 |---|---|---|
-| Needs | Python 3.10+ | Docker Desktop |
+| Needs | Python 3.11+ on Apple Silicon, 3.10+ elsewhere | Docker Desktop |
 | Incremental index run | ~10–30 seconds | ~2 minutes (Docker's macOS filesystem layer is slower) |
 | MCP server | Runs directly | Runs inside a container ([MCP via Docker](mcp.md#option-b-mcp-via-docker)) |
 | Best for | Most people, scheduled runs | Machines without a Python toolchain |
@@ -12,6 +12,7 @@ There are two ways to run mail-semantic-search. Both read the same `.env` and ca
 ## Requirements
 
 - macOS or Linux (developed and tested on macOS). The MailMate actions (`open_email`, `archive_email` and so on) are macOS only.
+- Native Apple Silicon installs use PyTorch 2.15. GPU acceleration (MPS) requires macOS 15 or newer.
 - An email client that stores messages as `.eml` files. MailMate is the main target; inbox listing and deep links assume MailMate's folder layout.
 - 16 GB+ RAM recommended. 8 GB may work for small archives. Apple Silicon or modern x86_64. Tested on a Mac Mini M4 with 24 GB.
 - Disk for the index: roughly **2.5 GB per 35 GB of email** (~700k messages), split across embeddings (~2.1 GB), model files (~420 MB) and metadata (~100–200 MB).
@@ -53,6 +54,8 @@ To try it on a small sample first:
 If you see `Operation not permitted` while reading mail, give your terminal app Full Disk Access (System Settings → Privacy & Security → Full Disk Access). This is common when the maildir is on an external drive.
 
 ### Upgrading
+
+On Apple Silicon, use Python 3.11 or newer. If the existing venv uses Python 3.10, create a fresh venv with the newer interpreter and point any scheduled jobs or MCP clients at it. You can reuse the existing index.
 
 ```bash
 git pull

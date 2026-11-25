@@ -14,6 +14,7 @@ Use this **instead of** a scheduled `index --incremental`, not alongside it. Chr
 
 - It runs an incremental pass 30 seconds after startup, then waits the interval between the end of one run and the start of the next.
 - It reuses the embedding model it already has loaded, and new mail is searchable as soon as a run finishes.
+- On Apple Silicon with MPS enabled, the server clears unused GPU memory after each indexing pass. If a tool call is in flight, it waits for that call to finish before clearing.
 - On macOS it posts a notification when runs start failing (once, not every run). Details go to `LOG_PATH`.
 - While it's up, CLI commands that open the index (`search`, `status`, `prune`, `compact-vectors` and so on) refuse to run. Use the MCP tools, or stop the server for maintenance. A leftover `index --incremental` job or `index-file` rule prints a skip line and exits 0, so it won't trigger alerts.
 - If something restarts the server while a maintenance command is still running, the server waits: its tools answer "index in use" and it takes over the index once the command finishes.

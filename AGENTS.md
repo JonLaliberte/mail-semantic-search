@@ -202,11 +202,11 @@ A loaded client never sees another process's writes: Chroma reads the HNSW index
 
 Measured on 703k vectors (Apple Silicon, 2026-10-03): index 4.56 GB → 2.26 GB, ~25 min copy plus ~2 min vacuum, 6.4 GB peak RSS. The `chromadb` directory itself did not shrink (15 GB → 17 GB) because the rewritten full-text tables came out larger — the win is RAM, not disk.
 
-Don't expect model memory back on Apple Silicon: after dropping the models and calling `torch.mps.empty_cache()`, the MPS driver keeps most of what it allocated. The idle saving is the index.
+On Apple Silicon, `torch.mps.empty_cache()` releases unused allocator buffers and, since PyTorch 2.15, clears the MPSGraph cache. The allocator or driver can still retain memory. The server requests a clear after each scheduled index pass that runs and when it drops the models on idle. `resources.py` defers the clear until all index passes and tool calls finish because the graph cache can contain objects a concurrent inference is still using.
 
 ## Fixed input shapes on MPS
 
-PyTorch's MPS backend keeps GPU memory for every distinct input shape it runs, and `torch.mps.empty_cache()` doesn't return it. sentence-transformers pads each batch only to its longest text, and the last batch of a call is whatever is left over, so almost every batch of real mail is a new shape. A server indexing every 5 minutes reached 17 GB of `IOAccelerator (graphics)` in `vmmap --summary` after 12 days (2026-11-25), and 120 random-length batches in isolation go from 2 GB to 14 GB.
+PyTorch 2.10's MPS backend kept GPU memory for every distinct input shape, even after `torch.mps.empty_cache()`. sentence-transformers pads each batch only to its longest text, and the last batch of a call is whatever is left over, so almost every batch of real mail is a new shape. A server indexing every 5 minutes reached 17 GB of `IOAccelerator (graphics)` in `vmmap --summary` after 12 days (2026-11-25), and 120 random-length batches in isolation went from 2 GB to 14 GB. Keep the shape bounds with PyTorch 2.15 to limit growth between cache clears.
 
 `fixed_shapes.install()` bounds the shapes when the model is on MPS. It wraps the `forward` of the Hugging Face model inside the SentenceTransformer / CrossEncoder: sequences of up to 128 tokens pad to 128, longer ones to 512 and then powers of two, batches pad to a power of two, and the outputs are cut back to the original shape. That gives at most 12 shapes per model at batch size 32 for a 512-token model. A model with no Hugging Face module inside (a `StaticEmbedding`) is logged and left unpadded rather than failing to load. `EmbeddingService` and `CrossEncoderReranker` both call it, and CPU and CUDA skip it. Outputs match the unpadded model to within ~1e-6.
 

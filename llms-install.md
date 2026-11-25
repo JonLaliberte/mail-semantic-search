@@ -11,7 +11,7 @@ Ground rules:
 ## 1. Check prerequisites
 
 - OS: macOS is the main target. Linux works for indexing, search and MCP; the MailMate actions are macOS only.
-- Python 3.10 or newer: `python3 --version`. If it's missing or too old on macOS, offer `brew install python@3.12` (Homebrew) and use that interpreter (e.g. `/opt/homebrew/bin/python3.12`) in step 3.
+- Python 3.11 or newer on Apple Silicon, and 3.10 or newer elsewhere. Check with `python3 --version`. If it's missing or too old on macOS, offer `brew install python@3.12` (Homebrew) and use that interpreter (e.g. `/opt/homebrew/bin/python3.12`) in step 3. MPS acceleration requires macOS 15 or newer.
 - `git --version`.
 - Memory: 16 GB+ RAM recommended (`sysctl -n hw.memsize` on macOS). Note it to the user if lower, but continue.
 

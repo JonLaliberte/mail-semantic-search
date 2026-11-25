@@ -1,12 +1,14 @@
 """Keep model inputs to a few fixed shapes on Apple's GPU (MPS).
 
-PyTorch's MPS backend keeps GPU memory for every distinct input shape it has
-run, and `torch.mps.empty_cache()` does not give it back. Batches are padded
+PyTorch 2.10's MPS backend kept GPU memory for every distinct input shape it
+ran, even after `torch.mps.empty_cache()`. Batches are padded
 only to their own longest text, and the last batch of a call is whatever is
 left over, so on real mail nearly every batch is a shape the backend hasn't
 seen yet. A long-lived MCP server that embeds new mail every few minutes
 therefore grows without bound: one ran up 17 GB of GPU memory in 12 days, and
-120 random-length batches in isolation take it from 2 GB to 14 GB.
+120 random-length batches in isolation took it from 2 GB to 14 GB.
+PyTorch 2.15 can reclaim more of this memory on a cache clear. Padding still
+bounds the number of shapes between clears.
 
 `install` wraps the forward pass of the Hugging Face model inside a
 SentenceTransformer or CrossEncoder. Before each pass it pads the token
