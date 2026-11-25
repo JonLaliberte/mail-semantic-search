@@ -202,7 +202,7 @@ A loaded client never sees another process's writes: Chroma reads the HNSW index
 
 Measured on 703k vectors (Apple Silicon, 2026-10-03): index 4.56 GB → 2.26 GB, ~25 min copy plus ~2 min vacuum, 6.4 GB peak RSS. The `chromadb` directory itself did not shrink (15 GB → 17 GB) because the rewritten full-text tables came out larger — the win is RAM, not disk.
 
-On Apple Silicon, `torch.mps.empty_cache()` releases unused allocator buffers and, since PyTorch 2.15, clears the MPSGraph cache. The allocator or driver can still retain memory. The server requests a clear after each scheduled index pass that runs and when it drops the models on idle. `resources.py` defers the clear until all index passes and tool calls finish because the graph cache can contain objects a concurrent inference is still using.
+On Apple Silicon, `torch.mps.empty_cache()` releases unused allocator buffers and, since PyTorch 2.13, clears the MPSGraph cache. The allocator or driver can still retain memory. The server requests a clear after each scheduled index pass that runs and when it drops the models on idle. `resources.py` defers the clear until all index passes and tool calls finish because the graph cache can contain objects a concurrent inference is still using.
 
 ## Fixed input shapes on MPS
 
