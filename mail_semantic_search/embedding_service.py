@@ -10,6 +10,7 @@ from sentence_transformers import SentenceTransformer
 from transformers.utils import logging as transformers_logging
 
 from mail_semantic_search.config import config
+from mail_semantic_search import fixed_shapes
 from mail_semantic_search.model_loader import load_model_local_first
 from mail_semantic_search.runtime_logging import (
     LoggerWriter,
@@ -62,6 +63,10 @@ class EmbeddingService:
             self.model = load_model_local_first(
                 SentenceTransformer, self.model_name, cache_folder=cache_dir
             )
+        # On Apple's GPU every new input shape costs memory that is never
+        # returned, so pad to a few fixed shapes (see fixed_shapes.py).
+        if fixed_shapes.uses_mps(self.model):
+            fixed_shapes.install(self.model)
         logger.info(
             "Model loaded successfully. Embedding dimension: %s",
             self.model.get_sentence_embedding_dimension(),

@@ -8,6 +8,7 @@ from typing import Dict, List
 from sentence_transformers import CrossEncoder
 
 from mail_semantic_search.config import config
+from mail_semantic_search import fixed_shapes
 from mail_semantic_search.model_loader import load_model_local_first
 from mail_semantic_search.runtime_logging import (
     LoggerWriter,
@@ -34,6 +35,9 @@ class CrossEncoderReranker:
                 config.reranker_model,
                 cache_folder=cache_dir,
             )
+        # Same reason as EmbeddingService: bound the input shapes on MPS.
+        if fixed_shapes.uses_mps(self.model):
+            fixed_shapes.install(self.model)
 
     def rerank(self, query: str, candidates: List[Dict], top_k: int) -> List[Dict]:
         """Rerank candidates and return top_k results."""
