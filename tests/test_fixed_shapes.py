@@ -36,23 +36,27 @@ def test_bucket(n, expected):
 @pytest.mark.parametrize(
     "n,max_length,expected",
     [(1, 512, 128), (128, 512, 128), (129, 512, 512), (512, 512, 512),
-     (5, 64, 64), (300, None, 512), (5, None, 128)],
+     (5, 64, 64), (300, None, 512), (5, None, 128),
+     # Truncation below 512 (all-MiniLM-L6-v2 truncates at 256).
+     (129, 256, 256), (256, 256, 256),
+     # Long-context models step by powers of two above 512, capped.
+     (600, 8192, 1024), (1025, 8192, 2048), (5000, 8192, 8192), (600, 1000, 1000)],
 )
 def test_length_bucket(n, max_length, expected):
     assert fixed_shapes.length_bucket(n, max_length) == expected
 
 
-def _save_tiny_bert(path, model_cls, **config_kwargs):
+def _save_tiny_bert(path, model_cls, positions=MAX_LENGTH, **config_kwargs):
     vocab = ["[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]"] + WORDS
     (path / "vocab.txt").write_text("\n".join(vocab) + "\n")
     tokenizer = BertTokenizerFast(
-        vocab_file=str(path / "vocab.txt"), model_max_length=MAX_LENGTH
+        vocab_file=str(path / "vocab.txt"), model_max_length=positions
     )
     torch.manual_seed(0)
     config = BertConfig(
         vocab_size=len(vocab), hidden_size=32, num_hidden_layers=2,
         num_attention_heads=2, intermediate_size=64,
-        max_position_embeddings=MAX_LENGTH, **config_kwargs,
+        max_position_embeddings=positions, **config_kwargs,
     )
     model_cls(config).save_pretrained(path)
     tokenizer.save_pretrained(path)
@@ -185,7 +189,7 @@ def _save_tiny_xlm_roberta(path):
 
 
 def test_pads_with_the_models_pad_token_id(tmp_path):
-    """A 129-token input pads to 514 on a pad-ID-1 model without overrunning positions."""
+    """A 129-token input pads on a pad-ID-1 model without overrunning positions."""
     path = _save_tiny_xlm_roberta(tmp_path)
     plain = st.CrossEncoder(path, device="cpu")
     padded = st.CrossEncoder(path, device="cpu")
@@ -195,7 +199,8 @@ def test_pads_with_the_models_pad_token_id(tmp_path):
     def tokens(pair):
         return len(plain.tokenizer(*pair)["input_ids"])
 
-    # 129 tokens: one past the short bucket, so it pads to the 514-entry max.
+    # 129 tokens: one past the short bucket, so it pads to the long bucket,
+    # 512 (the tokenizer's limit, two below the 514-entry position table).
     long_pair = ("q", "x" * 124)
     assert tokens(long_pair) == 129
     # A partial batch (3 rows -> 4) mixing short and boundary-length inputs.
@@ -206,4 +211,51 @@ def test_pads_with_the_models_pad_token_id(tmp_path):
     np.testing.assert_allclose(
         padded.predict([("q", "hi")]), plain.predict([("q", "hi")]), rtol=1e-4, atol=1e-5
     )
-    assert shapes == {(4, 514), (1, 128)}
+    assert shapes == {(4, 512), (1, 128)}
+
+
+def test_long_bucket_stops_at_the_truncation_length(tmp_path):
+    """Pad to what the model is fed, not to its position table.
+
+    Long-context models (bge-m3, nomic-embed-text) have 8192 positions; padding
+    every long input to that would make each batch enormous.
+    """
+    path = _save_tiny_bert(tmp_path, BertModel, positions=8192)
+    plain = st.SentenceTransformer(path, device="cpu")
+    rng = random.Random(2)
+    texts = [" ".join(rng.choices(WORDS, k=k)) for k in (5, 200, 700, 1500)]
+
+    for limit, lengths in ((256, {128, 256}), (1024, {128, 512, 1024})):
+        plain.max_seq_length = limit
+        # Installed after setting the limit, as the services do at load time.
+        model = st.SentenceTransformer(path, device="cpu")
+        model.max_seq_length = limit
+        fixed_shapes.install(model)
+        shapes = _record_shapes(model)
+        for text in texts:
+            np.testing.assert_allclose(
+                model.encode([text]), plain.encode([text]), rtol=1e-4, atol=1e-5
+            )
+        assert {n for _, n in shapes} == lengths
+
+
+def test_install_skips_models_without_a_hugging_face_module():
+    model = torch.nn.Sequential(torch.nn.Linear(4, 2))
+    fixed_shapes.install(model)  # no TypeError
+    x = torch.ones(3, 4)
+    assert model(x).shape == (3, 2)
+
+
+def test_cut_leaves_two_dimensional_outputs_alone():
+    """pooler_output is (batch, hidden), even when hidden equals the padded length."""
+    torch.manual_seed(0)
+    config = BertConfig(
+        vocab_size=50, hidden_size=128, num_hidden_layers=1, num_attention_heads=2,
+        intermediate_size=64, max_position_embeddings=512,
+    )
+    model = BertModel(config).eval()
+    fixed_shapes.install(model)
+    ids = torch.randint(5, 50, (3, 10))
+    out = model(input_ids=ids, attention_mask=torch.ones_like(ids))
+    assert out.last_hidden_state.shape == (3, 10, 128)
+    assert out.pooler_output.shape == (3, 128)
