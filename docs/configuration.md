@@ -56,7 +56,7 @@ Both of these are off by default and run entirely locally.
 |---|---|---|
 | `INCREMENTAL_OVERLAP_SECONDS` | `86400` | Re-scan window subtracted from the incremental watermark, to catch clock skew and late file writes. |
 | `BODY_PREVIEW_LIMIT` | `5000` | Max characters stored as the body preview. The embedded text is capped separately by the model's context window (~2000 characters for BGE-base), so this only affects snippet display. |
-| `MAX_EMAIL_FILE_SIZE` | `52428800` (50 MB) | Larger `.eml` files are skipped. |
+| `MAX_EMAIL_FILE_SIZE` | `52428800` (50 MiB) | Larger `.eml` files are skipped by indexing and rejected before parsing by `get_email_attachments`. |
 | `MAX_ATTACHMENT_SIZE` | `10485760` (10 MB) | Larger attachments are not text-extracted. |
 | `MAX_ATTACHMENT_TEXT_PER_FILE` | `2000` | Characters of extracted text kept per attachment. |
 | `MAX_TOTAL_ATTACHMENT_TEXT` | `5000` | Characters of attachment text kept per email. |

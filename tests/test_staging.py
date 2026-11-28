@@ -3,11 +3,13 @@
 import asyncio
 import base64
 import hashlib
+import json
 import os
 from email import policy
 from email.message import EmailMessage
 from email.parser import BytesParser
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastmcp import Client
@@ -322,6 +324,26 @@ def test_fetch_selects_ids_in_mime_order_and_intersects_filenames(indexed_messag
     assert fetch_attachments(file_path=str(source), attachment_ids=[])["attachments"] == []
 
 
+def test_fetch_uses_the_attachment_ids_for_the_exact_indexed_copy(indexed_message):
+    source, ids = indexed_message
+    copy = source.with_name("copy.eml")
+    copy.write_bytes(source.read_bytes())
+    message = BytesParser(policy=policy.default).parsebytes(copy.read_bytes())
+    attachments = extract_attachments(message, extract_text=False)
+    with Database() as database:
+        copy_id = _index_email(database, str(copy), attachments=attachments)
+        before = database.get_attachments(copy_id)[0]["id"]
+        _index_email(database, str(copy), attachments=attachments)
+        after = database.get_attachments(copy_id)[0]["id"]
+
+    result = fetch_attachments(
+        message_id="stage-test-001@example.com", file_path=str(copy),
+        attachment_ids=[ids[0], before, after],
+    )
+    assert [entry["id"] for entry in result["attachments"]] == [after]
+    assert result["unmatched_attachment_ids"] == sorted([ids[0], before])
+
+
 def test_fetch_clamps_caps_and_keeps_trying_later_files(indexed_message, monkeypatch):
     source, _ = indexed_message
     monkeypatch.setattr(config, "max_attachment_fetch_bytes", 5)
@@ -368,6 +390,111 @@ def test_fetch_reports_an_undecodable_part(indexed_message):
     assert unreadable["skipped"] == "unreadable"
     assert unreadable["data_base64"] is None
     assert result["attachments"][1]["skipped"] is None
+
+
+def test_fetch_decodes_only_selected_parts_that_fit(indexed_message, monkeypatch):
+    from mail_semantic_search import staging
+
+    source, ids = indexed_message
+    original_decode = staging._decode_payload
+    decoded = []
+
+    def record_decode(part):
+        decoded.append(part.get_filename())
+        return original_decode(part)
+
+    monkeypatch.setattr(staging, "_decode_payload", record_decode)
+    fetch_attachments(file_path=str(source), attachment_ids=[ids[2], ids[3]], max_bytes_per_file=5)
+    assert decoded == ["tiny.txt"]
+
+    decoded.clear()
+    fetch_attachments(file_path=str(source), max_bytes_per_file=5, max_total_bytes=5)
+    assert decoded == ["résumé.txt", "tiny.txt"]
+
+    decoded.clear()
+    fetch_attachments(file_path=str(source), filenames=["large.pdf"], max_total_bytes=0)
+    assert decoded == []
+
+
+@pytest.mark.parametrize("report_small_size", [False, True], ids=["fstat", "grew-after-fstat"])
+def test_fetch_rejects_oversize_source_before_parsing(indexed_message, monkeypatch, report_small_size):
+    from mail_semantic_search import staging
+
+    source, _ = indexed_message
+    monkeypatch.setattr(config, "max_email_file_size", source.stat().st_size)
+    with source.open("ab") as f:
+        f.write(b"x" * 20)
+
+    if report_small_size:
+        # Simulate an append after fstat, with the real file backing the read.
+        original_fstat = os.fstat
+
+        def stale_fstat(fd):
+            info = original_fstat(fd)
+            return SimpleNamespace(st_mode=info.st_mode, st_size=config.max_email_file_size)
+
+        monkeypatch.setattr(staging.os, "fstat", stale_fstat)
+
+    def unexpected_parse(*args, **kwargs):
+        pytest.fail("Oversized source reached MIME parser")
+
+    monkeypatch.setattr(staging.email, "message_from_bytes", unexpected_parse)
+    result = fetch_attachments(file_path=str(source), include_eml=True)
+    assert result["status"] == "source_too_large"
+    assert result["attachments"] == []
+    assert result["eml"]["skipped"] == "too_large"
+    assert result["eml"]["data_base64"] is None
+
+
+def test_fetch_and_stage_safe_names_and_empty_part_parity(indexed_message):
+    source, _ = indexed_message
+    attachments = [
+        ("../../etc/passwd", b"first"),
+        ("Invoice.pdf", b"second"),
+        ("invoice.pdf", b"third"),
+        ("invoice-2.pdf", b"fourth"),
+        (".bashrc", b"fifth"),
+        ("...", b"sixth"),
+        ("empty.txt", b""),
+    ]
+    _build_eml_with_attachments(
+        source, [(name, "application/octet-stream", data) for name, data in attachments]
+    )
+    fetched = fetch_attachments(file_path=str(source))["attachments"]
+    staged = stage_email(file_path=str(source), include_eml=False)["attachments"]
+    assert len(fetched) == len(staged) == len(attachments) - 1
+    assert len({entry["safe_name"].casefold() for entry in fetched}) == len(fetched)
+
+    for entry, staged_entry, (original_name, data) in zip(
+        fetched, staged, attachments[:-1], strict=True
+    ):
+        name = entry["safe_name"]
+        assert entry["filename"] == original_name
+        assert name and not name.startswith(".")
+        assert "/" not in name and "\\" not in name
+        assert Path(staged_entry["path"]).name == name
+        assert Path(staged_entry["path"]).read_bytes() == data
+        assert base64.b64decode(entry["data_base64"]) == data
+
+
+@pytest.mark.parametrize(("encoding", "wire", "decoded"), [
+    ("base64", b"QU\nJDag", b"ABCj"),
+    ("quoted-printable", b"A=42=\r\nC==D=", b"ABC=D"),
+    ("8bit", b"\xc3\xa9\xff", b"\xc3\xa9\xff"),
+    ("x-uuencode", b"begin 644 note\n#04)#\n`\nend", b"ABC"),
+])
+def test_fetch_preflight_matches_transfer_encoding(indexed_message, encoding, wire, decoded):
+    source, _ = indexed_message
+    source.write_bytes(
+        b'Content-Type: application/octet-stream\n'
+        b'Content-Disposition: attachment; filename="example.bin"\n'
+        + f"Content-Transfer-Encoding: {encoding}\n\n".encode("ascii")
+        + wire
+    )
+    result = fetch_attachments(file_path=str(source), max_bytes_per_file=len(decoded))
+    entry = result["attachments"][0]
+    assert entry["size"] == len(decoded)
+    assert base64.b64decode(entry["data_base64"]) == decoded
 
 
 def test_fetch_only_opens_indexed_eml_under_email_dir(indexed_message, tmp_path):
@@ -422,12 +549,32 @@ def test_fetch_through_mcp_without_opening_vector_store(indexed_message, monkeyp
         async with Client(mcp_server.mcp) as client:
             tools = {tool.name: tool for tool in await client.list_tools()}
             assert tools["get_email_attachments"].annotations.readOnlyHint
-            return await client.call_tool(
+            return await client.session.call_tool(
                 "get_email_attachments",
                 {"message_id": "stage-test-001@example.com", "attachment_ids": [ids[0]]},
             )
 
     result = asyncio.run(call())
-    assert result.data["status"] == "ok"
-    assert base64.b64decode(result.data["attachments"][0]["data_base64"]) == b"abcd"
+    assert result.structuredContent["status"] == "ok"
+    assert base64.b64decode(result.structuredContent["attachments"][0]["data_base64"]) == b"abcd"
+    assert result.content == []
     assert not config.staging_dir.exists()
+
+
+def test_fetch_mcp_serializes_three_mib_once(indexed_message):
+    from mail_semantic_search.mcp_server import mcp
+
+    source, _ = indexed_message
+    payload = b"x" * (3 * 1024 * 1024)
+    _build_eml_with_attachments(source, [("synthetic.bin", "application/octet-stream", payload)])
+
+    async def call():
+        async with Client(mcp) as client:
+            return await client.session.call_tool("get_email_attachments", {"file_path": str(source)})
+
+    result = asyncio.run(call())
+    wire = result.model_dump_json(by_alias=True)
+    base64_bytes = base64.b64encode(payload).decode("ascii")
+    assert wire.count(base64_bytes) == 1
+    assert len(wire) - len(base64_bytes) < 1024
+    assert json.loads(wire)["content"] == []

@@ -40,6 +40,7 @@ import anyio
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import Middleware
+from fastmcp.tools import ToolResult
 
 from mail_semantic_search import index_schedule, resources
 from mail_semantic_search.config import config
@@ -283,23 +284,24 @@ def get_email_attachments(
     include_eml: bool = False,
     max_bytes_per_file: Optional[int] = None,
     max_total_bytes: Optional[int] = None,
-) -> dict:
+) -> ToolResult:
     """Read attachment bytes from one indexed email and return them as base64.
 
     This read-only tool reads source .eml files within EMAIL_DIR. Pass a message
     ID or exact indexed path. When both are given, they must match the same row.
     Files that exceed the decoded-byte caps are listed with a skipped reason.
+    Read the response from structuredContent and use safe_name when saving files.
 
     Args:
         message_id: Message-ID from a search result, with or without angle brackets.
         file_path: Exact indexed .eml path from a search result.
-        attachment_ids: Attachment IDs from query_emails. Omit to allow all IDs.
+        attachment_ids: Current attachment IDs from query_emails. Pass the file_path from the same result to select the exact indexed copy.
         filenames: Exact decoded filenames. If IDs are also given, apply both filters.
         include_eml: Include the raw source message under the same caps, after attachments.
         max_bytes_per_file: Optional lower decoded-byte cap per file (server default 10 MiB).
         max_total_bytes: Optional lower decoded-byte cap for the response (server default 25 MiB).
     """
-    return fetch_attachments(
+    result = fetch_attachments(
         message_id=message_id,
         file_path=file_path,
         attachment_ids=attachment_ids,
@@ -308,6 +310,8 @@ def get_email_attachments(
         max_bytes_per_file=max_bytes_per_file,
         max_total_bytes=max_total_bytes,
     )
+    # Explicitly omit the duplicate JSON text block for this large response.
+    return ToolResult(content=[], structured_content=result)
 
 
 def stage_email_attachments(

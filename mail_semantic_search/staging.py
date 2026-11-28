@@ -13,6 +13,7 @@ files are overwritten on each call (so an updated .eml on disk propagates).
 from __future__ import annotations
 
 import base64
+import binascii
 import email
 import email.header
 import email.policy
@@ -22,7 +23,6 @@ import re
 import shutil
 import stat
 from collections import defaultdict, deque
-from contextlib import ExitStack
 from pathlib import Path
 from typing import BinaryIO, Dict, Iterator, List, NamedTuple, Optional
 
@@ -30,6 +30,13 @@ from mail_semantic_search.config import config
 from mail_semantic_search.database import Database, get_file_hash
 
 _SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._\- ]+")
+_BASE64_TOKENS = re.compile(r"[A-Za-z0-9+/]+|=+")
+_QP_ESCAPE = re.compile(r"=[0-9A-Fa-f]{2}|==|=\r[^\n]*(?:\n|\Z)|=\n|=\Z")
+_UU_LINE = re.compile(r"([^\r\n]*)(?:\r\n|\r|\n|\Z)")
+_UU_MODE = re.compile(r"begin [+-]?(?:0[oO]_?)?[0-7](?:_?[0-7])*(?=[ \r\n]|\Z)")
+_UU_END = re.compile(r"[ \t\f]*end[ \t\f]*")
+_UU_BODY = re.compile(r"[ -`]*")
+_UU_ENCODINGS = {"x-uuencode", "uuencode", "uue", "x-uue"}
 
 
 def _safe_filename(name: str, fallback: str) -> str:
@@ -38,7 +45,7 @@ def _safe_filename(name: str, fallback: str) -> str:
     if not name:
         return fallback
     name = _SAFE_FILENAME_RE.sub("_", name)
-    name = re.sub(r"\s+", " ", name).strip()
+    name = re.sub(r"\s+", " ", name).lstrip(".").strip()
     if not name:
         return fallback
     return name[:200]  # filesystem limit guard
@@ -105,13 +112,13 @@ class AttachmentPart(NamedTuple):
     filename: str
     safe_name: str
     content_type: str
-    payload: Optional[bytes]
-    indexed_size: int
+    mime_part: email.message.Message
 
 
 def iter_attachment_parts(msg: email.message.Message) -> Iterator[AttachmentPart]:
-    """Yield attachment metadata and decoded payloads in MIME traversal order."""
+    """Yield named attachment leaves in MIME traversal order without decoding."""
     used_names: set[str] = set()
+    next_suffix: dict[str, int] = {}
     for idx, part in enumerate(msg.walk()):
         if part.is_multipart():
             continue
@@ -121,38 +128,106 @@ def iter_attachment_parts(msg: email.message.Message) -> Iterator[AttachmentPart
         filename = _decode_filename(part.get_filename() or "")
         content_type = part.get_content_type() or "application/octet-stream"
         subtype = content_type.partition("/")[2]
-        extension = _safe_filename(f".{subtype}", "") if subtype != "octet-stream" else ""
+        extension = _safe_filename(subtype, "") if subtype != "octet-stream" else ""
+        if extension:
+            extension = "." + extension
         fallback = f"attachment-{idx}{extension}"[:200]
         name = _safe_filename(filename, fallback)
-        if name in {".", ".."}:
-            name = fallback
         stem, suffix = os.path.splitext(name)
         safe_name = name
-        number = 1
-        while safe_name in used_names:
-            number += 1
+        name_key = name.casefold()
+        number = next_suffix.get(name_key, 2)
+        while safe_name.casefold() in used_names:
             marker = f"-{number}"
             # Keep the extension when possible and reserve space for the marker.
             short_suffix = suffix[: 200 - len(marker)]
             safe_name = f"{stem[: 200 - len(marker) - len(short_suffix)]}{marker}{short_suffix}"
-        used_names.add(safe_name)
+            number += 1
+        next_suffix[name_key] = number
+        used_names.add(safe_name.casefold())
+        yield AttachmentPart(filename, safe_name, content_type, part)
 
-        try:
-            payload = part.get_payload(decode=True)
-        except (LookupError, TypeError, ValueError):
-            payload = None
-        try:
-            indexed_size = int(part.get("Content-Length") or 0)
-        except (TypeError, ValueError):
-            indexed_size = 0
-        # Indexing uses Content-Length when available. Fetch limits and
-        # response metadata always use the actual decoded byte count.
-        indexed_size = indexed_size or len(payload or b"")
-        # The email parser returns the encoded value unchanged when base64
-        # cannot be decoded at all. Keep the index key, but don't return it.
-        if any(isinstance(defect, email.errors.InvalidBase64LengthDefect) for defect in part.defects):
-            payload = None
-        yield AttachmentPart(filename, safe_name, content_type, payload, indexed_size)
+
+def _decode_payload(part: email.message.Message) -> Optional[bytes]:
+    try:
+        payload = part.get_payload(decode=True)
+    except (LookupError, TypeError, ValueError, binascii.Error):
+        return None
+    if any(isinstance(defect, email.errors.InvalidBase64LengthDefect) for defect in part.defects):
+        return None
+    return payload
+
+
+def _base64_size(raw: str) -> Optional[int]:
+    """Count decoded bytes, including MIME line breaks and recoverable padding."""
+    digits = 0
+    padding = False
+    for token in _BASE64_TOKENS.finditer(raw):
+        if raw[token.start()] == "=":
+            padding = True
+        elif padding:
+            # Python versions disagree on whether embedded padding ends
+            # the stream. Treat it as malformed rather than guess its size.
+            return None
+        else:
+            digits += token.end() - token.start()
+    return None if digits % 4 == 1 else digits * 3 // 4
+
+
+def _uu_size(raw: str) -> int:
+    """Size legacy uuencoded data from each line's decoded-length character."""
+    started = False
+    size = 0
+    for match in _UU_LINE.finditer(raw):
+        if match.start() == match.end():
+            break
+        start, end = match.span(1)
+        if not started:
+            started = _UU_MODE.match(raw, start) is not None
+            continue
+        if start == end:
+            return len(raw)  # The standard parser returns malformed uuencode as raw bytes.
+        if _UU_END.fullmatch(raw, start, end):
+            break
+        line_size = (ord(raw[start]) - 32) & 63
+        # The standard parser falls back to the line prefix on decoding errors.
+        end = min(start + (line_size * 4 + 5) // 3, end)
+        if not _UU_BODY.fullmatch(raw, start + 1, end):
+            return len(raw)
+        size += line_size
+    return size if started else len(raw)
+
+
+def _attachment_sizes(part: email.message.Message) -> tuple[Optional[int], int]:
+    """Return the decoded size and the size used by the metadata index."""
+    # BytesParser stores the wire payload as ASCII with surrogate escapes.
+    # get_payload(decode=False) can replace those escapes using the part's
+    # charset, which loses the byte count for 8bit or binary attachments.
+    raw = part._payload
+    if not isinstance(raw, str):
+        return None, 0
+    cte = part.get("Content-Transfer-Encoding", "")
+    encoding = getattr(cte, "cte", str(cte).strip().lower())
+    size = len(raw)
+    if encoding == "base64":
+        size = _base64_size(raw)
+    elif encoding == "quoted-printable":
+        for escape in _QP_ESCAPE.finditer(raw):
+            length = escape.end() - escape.start()
+            emits_byte = length > 1 and raw[escape.start() + 1] not in "\r\n"
+            size -= length - emits_byte
+    elif encoding in _UU_ENCODINGS:
+        size = _uu_size(raw)
+    try:
+        indexed_size = int(part.get("Content-Length") or 0)
+    except (TypeError, ValueError):
+        indexed_size = 0
+    if size is None:
+        # For invalid-length base64 the index counted the undecoded text.
+        index_fallback = len(raw) - raw.count("\r") - raw.count("\n")
+    else:
+        index_fallback = size
+    return size, indexed_size or index_fallback
 
 
 def _open_email_source(path: Path) -> BinaryIO:
@@ -249,87 +324,105 @@ def fetch_attachments(
 
     result.update(message_id=row["message_id"], file_path=row["file_path"])
     source_path = Path(row["file_path"])
-    with ExitStack() as stack:
-        try:
-            root = config.email_dir.resolve()
-            resolved = source_path.resolve()
-            if (
-                not resolved.is_relative_to(root)
-                or source_path.suffix.lower() != ".eml"
-                or resolved.suffix.lower() != ".eml"
-            ):
-                result["status"] = "source_outside_email_dir"
-                return result
-        except (OSError, RuntimeError, ValueError):
-            result["status"] = "source_unreadable"
+    try:
+        root = config.email_dir.resolve()
+        resolved = source_path.resolve()
+        if (
+            not resolved.is_relative_to(root)
+            or source_path.suffix.lower() != ".eml"
+            or resolved.suffix.lower() != ".eml"
+        ):
+            result["status"] = "source_outside_email_dir"
             return result
-
-        try:
-            source = stack.enter_context(_open_email_source(resolved))
-            msg = email.message_from_binary_file(source, policy=email.policy.default)
-        except FileNotFoundError:
-            result["status"] = "source_missing"
-            return result
-        except (OSError, ValueError, email.errors.MessageError):
-            result["status"] = "source_unreadable"
-            return result
-
-        ids_by_part = defaultdict(deque)
-        for attachment in indexed_attachments:
-            key = (attachment["filename"], attachment["content_type"], attachment["size"])
-            ids_by_part[key].append(attachment["id"])
-
-        unmatched_ids = set(requested_ids or ())
-        for part in iter_attachment_parts(msg):
-            key = (part.filename, part.content_type, part.indexed_size)
-            matching_ids = ids_by_part.get(key)
-            attachment_id = matching_ids.popleft() if matching_ids else None
-            unmatched_ids.discard(attachment_id)
-            if requested_ids is not None and attachment_id not in requested_ids:
-                continue
-            filename = part.filename or part.safe_name
-            if requested_names is not None and filename not in requested_names:
-                continue
-
-            payload = part.payload
-            size = len(payload) if payload is not None else None
-            skipped = "unreadable" if size is None else _skip_reason(size, per_file, remaining)
-            entry = _fetch_entry(
-                filename, part.safe_name, part.content_type, size,
-                payload if skipped is None else None, skipped,
-            )
-            entry["id"] = attachment_id
-            result["attachments"].append(entry)
-            if skipped is None and size is not None:
-                remaining -= size
-
-        if include_eml:
-            result["eml"] = _fetch_source_eml(source, per_file, remaining)
-        result.update(status="ok", unmatched_attachment_ids=sorted(unmatched_ids))
+    except (OSError, RuntimeError, ValueError):
+        result["status"] = "source_unreadable"
         return result
 
-
-def _fetch_source_eml(source: BinaryIO, per_file: int, remaining: int) -> Dict:
-    """Return the raw message if it fits the remaining response budget."""
-    payload = None
-    size = None
     try:
-        size = os.fstat(source.fileno()).st_size
-        skipped = _skip_reason(size, per_file, remaining)
-        if skipped is None:
-            source.seek(0)
-            payload = source.read(size + 1)
-            # Recheck if an index source was modified while the call was in flight.
-            size = max(len(payload), os.fstat(source.fileno()).st_size)
-            skipped = _skip_reason(size, per_file, remaining)
-            if size != len(payload) and skipped is None:
-                skipped = "unreadable"
-    except OSError:
-        skipped = "unreadable"
-    return _fetch_entry(
-        "message.eml", "message.eml", "message/rfc822", size,
-        payload if skipped is None else None, skipped,
+        with _open_email_source(resolved) as source:
+            source_limit = config.max_email_file_size
+            source_size = os.fstat(source.fileno()).st_size
+            if source_size <= source_limit:
+                # fstat checks the opened file. The bounded read also catches
+                # growth between checking the size and reading the contents.
+                raw = source.read(source_limit + 1)
+                source_size = len(raw)
+            if source_size > source_limit:
+                result["status"] = "source_too_large"
+                if include_eml:
+                    result["eml"] = _source_entry(source_size, None, "too_large")
+                return result
+
+        msg = email.message_from_bytes(raw, policy=email.policy.default)
+    except FileNotFoundError:
+        result["status"] = "source_missing"
+        return result
+    except (OSError, ValueError, RecursionError, email.errors.MessageError):
+        result["status"] = "source_unreadable"
+        return result
+
+    source_payload = (
+        raw if include_eml and _skip_reason(source_size, per_file, remaining) is None else None
     )
+    del raw
+    ids_by_part = defaultdict(deque)
+    selected_keys = set()
+    for attachment in indexed_attachments:
+        name_and_type = (attachment["filename"], attachment["content_type"])
+        key = (*name_and_type, attachment["size"])
+        ids_by_part[key].append(attachment["id"])
+        if requested_ids is not None and attachment["id"] in requested_ids:
+            selected_keys.add(name_and_type)
+
+    unmatched_ids = set(requested_ids or ())
+    for part in iter_attachment_parts(msg):
+        name_and_type = (part.filename, part.content_type)
+        if requested_ids is not None and name_and_type not in selected_keys:
+            continue
+        filename = part.filename or part.safe_name
+        if (
+            requested_ids is None and requested_names is not None
+            and part.filename and filename not in requested_names
+        ):
+            continue
+
+        size, indexed_size = _attachment_sizes(part.mime_part)
+        matching_ids = ids_by_part.get((*name_and_type, indexed_size))
+        attachment_id = matching_ids.popleft() if matching_ids else None
+        unmatched_ids.discard(attachment_id)
+        if requested_ids is not None and attachment_id not in requested_ids:
+            continue
+        if requested_names is not None and filename not in requested_names:
+            continue
+        if size == 0:
+            continue  # Local staging also omits empty attachments.
+
+        payload = None
+        skipped = "unreadable" if size is None else _skip_reason(size, per_file, remaining)
+        if skipped is None:
+            payload = _decode_payload(part.mime_part)
+            if not payload or len(payload) != size:
+                # If a decoder disagrees with preflight, never return bytes
+                # that were not included in the size check.
+                payload = None
+                skipped = "unreadable"
+            else:
+                remaining -= len(payload)
+        entry = _fetch_entry(filename, part.safe_name, part.content_type, size, payload, skipped)
+        entry["id"] = attachment_id
+        result["attachments"].append(entry)
+
+    if include_eml:
+        skipped = _skip_reason(source_size, per_file, remaining)
+        result["eml"] = _source_entry(
+            source_size, source_payload if skipped is None else None, skipped
+        )
+    result.update(status="ok", unmatched_attachment_ids=sorted(unmatched_ids))
+    return result
+
+
+def _source_entry(size: int, payload: Optional[bytes], skipped: Optional[str]) -> Dict:
+    return _fetch_entry("message.eml", "message.eml", "message/rfc822", size, payload, skipped)
 
 
 def stage_email(
@@ -402,11 +495,12 @@ def stage_email(
 
     saved: List[Dict] = []
     for part in iter_attachment_parts(msg):
-        if not part.payload:
+        payload = _decode_payload(part.mime_part)
+        if not payload:
             continue
 
         out_path = attachments_dir / part.safe_name
-        out_path.write_bytes(part.payload)
+        out_path.write_bytes(payload)
         saved.append(
             {
                 "filename": part.filename or part.safe_name,
