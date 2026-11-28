@@ -97,6 +97,8 @@ claude mcp add --scope user mail-semantic-search -- /bin/zsh -lc "cd INSTALL_DIR
 
 For clients that need actual attachment bytes, the MCP tool is `get_email_attachments`. It returns base64 for the client to decode and leaves staging to the client. The defaults are 10 MiB per file and 25 MiB per call, before base64 encoding. On a remote server where clients fetch bytes directly, set `DISABLE_STAGING_TOOLS=true` in `.env` to hide the server-side staging and cleanup tools. [Attachment tool reference](docs/mcp.md#fetch-attachment-bytes)
 
+For a remote search server and a client that needs readable attachment files, add a second local stdio server using `mail-semantic-search-stager`. It takes the HTTPS endpoint, bearer token file, CA file and local output directory as arguments. Use a folder the client's file tools can access. [Local stager setup](docs/mcp.md#stage-attachments-on-the-client)
+
 If the mail folder or `INSTALL_DIR` is on an external drive (`/Volumes/...`), macOS may block the client app from reading it. Explain this to the user and point them to the HTTP workaround: https://github.com/JonLaliberte/mail-semantic-search/blob/main/docs/mcp.md#mcp-over-http-full-disk-access-workaround
 
 ## 7. Schedule updates (ask first)

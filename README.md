@@ -6,7 +6,7 @@ Find any email you've ever received by describing it. "The lease renewal the lan
 
 - **Search by meaning, not exact words.** A question about "travel plans" finds the flight confirmation that never uses the word "travel". Attachment text (PDF, Word, Excel, PowerPoint) is indexed too.
 - **Precise filters when you know them.** Sender, recipient, subject, date range, attachment type or filename. Combine them with a meaning-based query, or use them on their own for instant lookups.
-- **Your inbox, available to your AI assistant.** A built-in [MCP](https://modelcontextprotocol.io) server lets Claude Desktop, Claude Code and other MCP clients search mail, list inbox messages, fetch attachment bytes with `get_email_attachments`, and act on messages in MailMate. [MCP tools](docs/mcp.md#tools)
+- **Your inbox, available to your AI assistant.** A built-in MCP server lets Claude Desktop, Claude Code and other MCP clients search mail, list inbox messages, and act on messages in MailMate. A local stager saves attachments from a remote index to files your client can read. [MCP tools](docs/mcp.md#tools) · [Local stager](docs/mcp.md#stage-attachments-on-the-client)
 - **Private by design.** Embedding models run locally. No API keys, no cloud, no telemetry.
 - **Stays current cheaply.** Incremental runs only look at mail that changed since the last run, which typically takes 10–30 seconds.
 

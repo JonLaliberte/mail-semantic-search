@@ -36,6 +36,32 @@ The default caps are 10 MiB per file and 25 MiB combined, measured before base64
 
 The top-level `status` is `ok` when the source could be read, even if entries were skipped. Other statuses are `not_indexed`, `source_missing`, `source_outside_email_dir` (including a non-`.eml` path), `source_unreadable`, and `source_too_large`. Sources above `MAX_EMAIL_FILE_SIZE` are rejected before MIME parsing. When `include_eml=true`, an oversized source also has `eml.skipped` set to `too_large`. When configuring a client or proxy with a tool allowlist, give `get_email_attachments` only to clients that should receive the source bytes.
 
+### Stage attachments on the client
+
+When the search index runs on another machine, launch `mail-semantic-search-stager` as a local stdio MCP server. It authenticates to the remote HTTPS MCP endpoint with a bearer token, writes fetched files under the local output directory, and returns attachment names, paths, sizes and skipped reasons.
+
+```json
+{
+  "mcpServers": {
+    "mail-stage": {
+      "command": "/path/to/.venv/bin/mail-semantic-search-stager",
+      "args": [
+        "--endpoint", "https://mail-search.example/mcp",
+        "--token-file", "/path/to/private/mcp-token",
+        "--ca-file", "/path/to/server-ca.pem",
+        "--output-dir", "/path/to/mail-attachments"
+      ]
+    }
+  }
+}
+```
+
+Use a private token file and an output directory visible to your client's file tools. The launch command works with Claude Desktop, Claude Code and other stdio clients. For a standalone setup, install FastMCP 3.3.1 or later in a Python environment and run `attachment_stager.py` with that Python and the same arguments.
+
+Use a real directory path with no symbolic-link components. The stager creates missing directories with mode 0700 and requires the output root and staging subdirectories to be owned by the local user and writable only by that user. The HTTPS client rejects redirects and limits each uncompressed MCP response to 40 MiB, including base64 and protocol overhead.
+
+The stager exposes `stage_email_attachments` and `clear_staged_emails`. Stage by Message-ID or exact indexed path, optionally with attachment IDs or filenames. Use `include_eml=false` for attachments only. All files remain subject to the remote caps. Each email stages into a stable twelve-character directory, which you can pass as `short_hash` to remove that email's staged copies. Omitting the hash clears staged email directories under the configured output root.
+
 ### Filter semantics (`search_emails` and `query_emails`)
 
 - `from_addr`, `to_addr`, `subject_like` and `attachment_name` are partial matches. `to_addr` covers To, CC and BCC.
