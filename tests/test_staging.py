@@ -16,7 +16,7 @@ from fastmcp import Client
 
 from mail_semantic_search.config import config
 from mail_semantic_search.database import Database, get_file_hash
-from mail_semantic_search.mailmate_reader import extract_attachments
+from mail_semantic_search.mailmate_reader import extract_attachments, parse_email_file
 from mail_semantic_search.staging import fetch_attachments, stage_email
 
 
@@ -448,7 +448,7 @@ def test_fetch_rejects_oversize_source_before_parsing(indexed_message, monkeypat
     def unexpected_parse(*args, **kwargs):
         pytest.fail("Oversized source reached MIME parser")
 
-    monkeypatch.setattr(staging.email, "message_from_bytes", unexpected_parse)
+    monkeypatch.setattr(staging.email, "message_from_binary_file", unexpected_parse)
     result = fetch_attachments(file_path=str(source), include_eml=True)
     assert result["status"] == "source_too_large"
     assert result["attachments"] == []
@@ -468,6 +468,10 @@ def test_fetch_and_stage_safe_names_and_empty_part_parity(indexed_message):
         (". .notes", b"seventh"),
         (". .", b"eighth"),
         (". ..", b"ninth"),
+        ("CON.txt", b"tenth"),
+        ("cOm2 .notes", b"eleventh"),
+        ("NUL", b"twelfth"),
+        ("report.pdf. ", b"thirteenth"),
         ("empty.txt", b""),
     ]
     _build_eml_with_attachments(
@@ -477,12 +481,15 @@ def test_fetch_and_stage_safe_names_and_empty_part_parity(indexed_message):
     staged = stage_email(file_path=str(source), include_eml=False)["attachments"]
     assert len(fetched) == len(staged) == len(attachments) - 1
     assert len({entry["safe_name"].casefold() for entry in fetched}) == len(fetched)
+    assert [entry["safe_name"] for entry in fetched[-4:]] == [
+        "_CON.txt", "_cOm2 .notes", "_NUL", "report.pdf",
+    ]
 
     for entry, staged_entry, (original_name, data) in zip(
         fetched, staged, attachments[:-1], strict=True
     ):
         name = entry["safe_name"]
-        assert entry["filename"] == original_name
+        assert entry["filename"] == original_name.rstrip()
         assert name and not name.startswith(".")
         assert "/" not in name and "\\" not in name
         assert Path(staged_entry["path"]).name == name
@@ -539,6 +546,82 @@ def test_fetch_preflight_matches_index_for_noncanonical_encoding(indexed_message
 
     limited = fetch_attachments(file_path=str(source), max_bytes_per_file=len(expected) - 1)
     assert limited["attachments"][0]["skipped"] == "too_large"
+
+
+def _write_crlf_message(source, attachments):
+    lines = [
+        b"From: Project Desk <sender@example.com>",
+        b"To: Operations <rcpt@example.com>",
+        b"Date: Sat, 28 Nov 2026 10:00:00 +0000",
+        b"Subject: Schedule and notes",
+        b"Message-ID: <schedule-test@example.com>",
+        b"MIME-Version: 1.0",
+        b'Content-Type: multipart/mixed; boundary="schedule-mime-boundary"',
+        b"",
+        b"--schedule-mime-boundary",
+        b"Content-Type: text/plain; charset=us-ascii",
+        b"",
+        b"See the schedule notes attached.",
+    ]
+    for name, encoding, body in attachments:
+        lines.extend([
+            b"--schedule-mime-boundary",
+            b"Content-Type: text/plain; charset=us-ascii",
+            f'Content-Disposition: attachment; filename="{name}"'.encode("ascii"),
+            b"Content-Transfer-Encoding: " + encoding,
+            b"",
+            body,
+        ])
+    lines.extend([b"--schedule-mime-boundary--", b""])
+    source.write_bytes(b"\r\n".join(lines))
+
+
+def test_fetch_uses_indexer_newline_handling_and_keeps_raw_crlf(indexed_message):
+    source, _ = indexed_message
+    _write_crlf_message(source, [("schedule.txt", b"7bit", b"Mon: Draft\r\nTue: Review")])
+    message = parse_email_file(source)
+    expected = b"Mon: Draft\nTue: Review"
+    assert message["attachments"][0]["size"] == len(expected)
+    with Database() as database:
+        email_id = database.add_email(message, message["attachments"], file_mtime=1000.0)
+        attachment_id = database.get_attachments(email_id)[0]["id"]
+
+    result = fetch_attachments(file_path=str(source), attachment_ids=[attachment_id], include_eml=True)
+    assert result["unmatched_attachment_ids"] == []
+    entry, = result["attachments"]
+    assert entry["id"] == attachment_id
+    assert entry["size"] == len(expected)
+    assert base64.b64decode(entry["data_base64"]) == expected
+    assert base64.b64decode(result["eml"]["data_base64"]) == source.read_bytes()
+    staged = stage_email(file_path=str(source), include_eml=False)
+    assert Path(staged["attachments"][0]["path"]).read_bytes() == expected
+
+
+@pytest.mark.parametrize("indexed_sizes", [[4, 3, 4, 5], [3, 3, 4, 3]])
+def test_fetch_matches_ids_for_a_copied_index_across_decoder_versions(indexed_message, indexed_sizes):
+    source, _ = indexed_message
+    _write_crlf_message(source, [
+        ("schedule.txt", b"base64 ", b"YWJj"),
+        ("schedule.txt", b"7bit", b"Tue"),
+        ("schedule.txt", b"7bit", b"Wed."),
+        ("review.txt", b"quoted-printable (comment)", b"a=62c"),
+    ])
+    message = parse_email_file(source)
+    # Record the sizes a 3.11 or 3.12+ indexer would have stored, with
+    # same-name leaves whose sizes overlap across the two decoders.
+    for attachment, size in zip(message["attachments"], indexed_sizes, strict=True):
+        attachment["size"] = size
+    with Database() as database:
+        email_id = database.add_email(message, message["attachments"], file_mtime=1000.0)
+        ids = [row["id"] for row in database.get_attachments(email_id)]
+
+    result = fetch_attachments(file_path=str(source), attachment_ids=ids)
+    staged = stage_email(file_path=str(source), include_eml=False)
+    assert result["unmatched_attachment_ids"] == []
+    assert [entry["id"] for entry in result["attachments"]] == ids
+    assert [base64.b64decode(entry["data_base64"]) for entry in result["attachments"]] == [
+        Path(entry["path"]).read_bytes() for entry in staged["attachments"]
+    ]
 
 
 def test_fetch_raw_message_has_unique_basename(indexed_message):

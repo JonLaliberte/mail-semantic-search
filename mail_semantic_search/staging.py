@@ -18,6 +18,7 @@ import email
 import email.header
 import email.policy
 import hashlib
+import io
 import os
 import re
 import shutil
@@ -30,6 +31,7 @@ from mail_semantic_search.config import config
 from mail_semantic_search.database import Database, get_file_hash
 
 _SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._\- ]+")
+_WINDOWS_DEVICE_NAME = re.compile(r"CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9]", re.IGNORECASE)
 _BASE64_TOKENS = re.compile(r"[A-Za-z0-9+/]+|=+")
 _QP_ESCAPE = re.compile(r"=[0-9A-Fa-f]{2}|==|=\r[^\n]*(?:\n|\Z)|=\n|=\Z")
 _UU_LINE = re.compile(r"([^\r\n]*)(?:\r\n|\r|\n|\Z)")
@@ -52,10 +54,12 @@ def _safe_filename(name: str, fallback: str) -> str:
     if not name:
         return fallback
     name = _SAFE_FILENAME_RE.sub("_", name)
-    name = re.sub(r"\s+", " ", name).lstrip(" .").rstrip()
+    name = re.sub(r"\s+", " ", name).lstrip(" .")[:200].rstrip(" .")
     if not name:
         return fallback
-    return name[:200]  # filesystem limit guard
+    if _WINDOWS_DEVICE_NAME.fullmatch(name.partition(".")[0].rstrip()):
+        return ("_" + name)[:200].rstrip(" .")
+    return name
 
 
 def _decode_filename(raw_filename: str) -> str:
@@ -155,7 +159,7 @@ def iter_attachment_parts(msg: email.message.Message) -> Iterator[AttachmentPart
         extension = _safe_filename(subtype, "") if subtype != "octet-stream" else ""
         if extension:
             extension = "." + extension
-        fallback = f"attachment-{idx}{extension}"[:200]
+        fallback = f"attachment-{idx}{extension}"[:200].rstrip(" .")
         name = _safe_filename(filename, fallback)
         yield AttachmentPart(filename, _unique_name(name, used_names, next_suffix), content_type, part)
 
@@ -214,19 +218,7 @@ def _uu_size(raw: str) -> int:
     return size if started else len(raw)
 
 
-def _attachment_sizes(part: email.message.Message) -> tuple[Optional[int], int]:
-    """Return the decoded size and the size used by the metadata index."""
-    # BytesParser stores the wire payload as ASCII with surrogate escapes.
-    # get_payload(decode=False) can replace those escapes using the part's
-    # charset, which loses the byte count for 8bit or binary attachments.
-    raw = part._payload
-    if not isinstance(raw, str):
-        return None, 0
-    cte = part.get("Content-Transfer-Encoding", "")
-    if _DECODER_USES_CTE_TOKEN:
-        encoding = getattr(cte, "cte", str(cte).strip().lower())
-    else:
-        encoding = str(cte).lower()
+def _decoded_size(raw: str, encoding: str) -> Optional[int]:
     size = len(raw)
     if encoding == "base64":
         size = _base64_size(raw)
@@ -237,16 +229,63 @@ def _attachment_sizes(part: email.message.Message) -> tuple[Optional[int], int]:
             size -= length - emits_byte
     elif encoding in _UU_ENCODINGS:
         size = _uu_size(raw)
+    return size
+
+
+def _attachment_sizes(part: email.message.Message) -> tuple[Optional[int], tuple[int, ...]]:
+    """Return the local decoded size and possible sizes recorded by the index."""
+    # The parser stores escapes for non-ASCII bytes. get_payload(decode=False)
+    # can replace them using the part's charset, which loses the byte count.
+    raw = part._payload
+    if not isinstance(raw, str):
+        return None, (0,)
+    cte = part.get("Content-Transfer-Encoding", "")
+    old_encoding = str(cte).lower()
+    token_encoding = getattr(cte, "cte", old_encoding.strip())
+    local, other = (
+        (token_encoding, old_encoding) if _DECODER_USES_CTE_TOKEN
+        else (old_encoding, token_encoding)
+    )
+    size = _decoded_size(raw, local)
     try:
         indexed_size = int(part.get("Content-Length") or 0)
     except (TypeError, ValueError):
         indexed_size = 0
-    if size is None:
-        # For invalid-length base64 the index counted the undecoded text.
-        index_fallback = len(raw) - raw.count("\r") - raw.count("\n")
-    else:
-        index_fallback = size
-    return size, indexed_size or index_fallback
+    if indexed_size:
+        return size, (indexed_size,)
+
+    # For invalid-length base64 the index counted the undecoded text.
+    fallback = len(raw) - raw.count("\r") - raw.count("\n") if size is None else size
+    if other == local:
+        return size, (fallback,)
+    other_size = _decoded_size(raw, other)
+    if other_size is None:
+        other_size = len(raw) - raw.count("\r") - raw.count("\n")
+    return size, (fallback, other_size)
+
+
+def _match_attachment_ids(
+    part_sizes: list[tuple[int, ...]], rows: list[Dict]
+) -> list[Optional[int]]:
+    """Match one filename/type group, preferring a complete match in MIME order."""
+    if len(part_sizes) == len(rows) and any(
+        all(row["size"] == sizes[variant] for sizes, row in zip(part_sizes, rows))
+        for variant in (0, -1)
+    ):
+        # Same-name leaves can share a possible size across runtimes. Pair them
+        # in the order the indexer stored them before trying local sizes alone.
+        return [row["id"] for row in rows]
+
+    # A changed source may lack some indexed parts. Keep exact-size matching
+    # for the parts that remain rather than using ambiguous alternate sizes.
+    ids_by_size = defaultdict(deque)
+    for row in rows:
+        ids_by_size[row["size"]].append(row["id"])
+    matched = []
+    for local_size, *_ in part_sizes:
+        ids = ids_by_size.get(local_size)
+        matched.append(ids.popleft() if ids else None)
+    return matched
 
 
 def _open_email_source(path: Path) -> BinaryIO:
@@ -372,7 +411,10 @@ def fetch_attachments(
                     result["eml"] = _source_entry(source_size, None, "too_large")
                 return result
 
-        msg = email.message_from_bytes(raw, policy=email.policy.default)
+        # Use the indexer's file parser, including universal newline handling.
+        # Keep raw separately so include_eml can return the original bytes.
+        with io.BytesIO(raw) as source:
+            msg = email.message_from_binary_file(source, policy=email.policy.default)
     except FileNotFoundError:
         result["status"] = "source_missing"
         return result
@@ -384,16 +426,16 @@ def fetch_attachments(
         raw if include_eml and _skip_reason(source_size, per_file, remaining) is None else None
     )
     del raw
-    ids_by_part = defaultdict(deque)
+    rows_by_part = defaultdict(list)
     selected_keys = set()
     for attachment in indexed_attachments:
         name_and_type = (attachment["filename"], attachment["content_type"])
-        key = (*name_and_type, attachment["size"])
-        ids_by_part[key].append(attachment["id"])
+        rows_by_part[name_and_type].append(attachment)
         if requested_ids is not None and attachment["id"] in requested_ids:
             selected_keys.add(name_and_type)
 
-    unmatched_ids = set(requested_ids or ())
+    parts = []
+    positions_by_part = defaultdict(list)
     for part in iter_attachment_parts(msg):
         name_and_type = (part.filename, part.content_type)
         if requested_ids is not None and name_and_type not in selected_keys:
@@ -405,9 +447,20 @@ def fetch_attachments(
         ):
             continue
 
-        size, indexed_size = _attachment_sizes(part.mime_part)
-        matching_ids = ids_by_part.get((*name_and_type, indexed_size))
-        attachment_id = matching_ids.popleft() if matching_ids else None
+        size, indexed_sizes = _attachment_sizes(part.mime_part)
+        positions_by_part[name_and_type].append(len(parts))
+        parts.append((part, filename, size, indexed_sizes))
+
+    ids = [None] * len(parts)
+    for key, positions in positions_by_part.items():
+        matched = _match_attachment_ids(
+            [parts[position][3] for position in positions], rows_by_part.get(key, [])
+        )
+        for position, attachment_id in zip(positions, matched, strict=True):
+            ids[position] = attachment_id
+
+    unmatched_ids = set(requested_ids or ())
+    for (part, filename, size, _), attachment_id in zip(parts, ids, strict=True):
         unmatched_ids.discard(attachment_id)
         if requested_ids is not None and attachment_id not in requested_ids:
             continue
