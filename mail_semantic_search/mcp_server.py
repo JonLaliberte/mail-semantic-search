@@ -54,7 +54,7 @@ from mail_semantic_search.search import (
     search_email_records_payload,
 )
 from mail_semantic_search.service_models import InboxRequest, QueryRequest, SearchRequest
-from mail_semantic_search.staging import clear_staged, stage_email
+from mail_semantic_search.staging import clear_staged, fetch_attachments, stage_email
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +65,10 @@ class _ResourceUseMiddleware(Middleware):
     """Keep the index and models loaded while any tool call is in flight."""
 
     async def on_call_tool(self, context, call_next):
+        # Attachment fetch only reads SQLite and the maildir. Opening Chroma
+        # here would write to disk and unnecessarily load the vector index.
+        if context.message.name == "get_email_attachments":
+            return await call_next(context)
         # Off the event loop: taking the lock can open SQLite and wait on it.
         await anyio.to_thread.run_sync(index_schedule.ensure_index_available)
         use = resources.in_use()
@@ -270,7 +274,42 @@ def list_inbox_emails(
     )
 
 
-@mcp.tool
+@mcp.tool(annotations={"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False})
+def get_email_attachments(
+    message_id: Optional[str] = None,
+    file_path: Optional[str] = None,
+    attachment_ids: Optional[list[int]] = None,
+    filenames: Optional[list[str]] = None,
+    include_eml: bool = False,
+    max_bytes_per_file: Optional[int] = None,
+    max_total_bytes: Optional[int] = None,
+) -> dict:
+    """Read attachment bytes from one indexed email and return them as base64.
+
+    This read-only tool reads source .eml files within EMAIL_DIR. Pass a message
+    ID or exact indexed path. When both are given, they must match the same row.
+    Files that exceed the decoded-byte caps are listed with a skipped reason.
+
+    Args:
+        message_id: Message-ID from a search result, with or without angle brackets.
+        file_path: Exact indexed .eml path from a search result.
+        attachment_ids: Attachment IDs from query_emails. Omit to allow all IDs.
+        filenames: Exact decoded filenames. If IDs are also given, apply both filters.
+        include_eml: Include the raw source message under the same caps, after attachments.
+        max_bytes_per_file: Optional lower decoded-byte cap per file (server default 10 MiB).
+        max_total_bytes: Optional lower decoded-byte cap for the response (server default 25 MiB).
+    """
+    return fetch_attachments(
+        message_id=message_id,
+        file_path=file_path,
+        attachment_ids=attachment_ids,
+        filenames=filenames,
+        include_eml=include_eml,
+        max_bytes_per_file=max_bytes_per_file,
+        max_total_bytes=max_total_bytes,
+    )
+
+
 def stage_email_attachments(
     message_id: Optional[str] = None,
     file_path: Optional[str] = None,
@@ -299,7 +338,6 @@ def stage_email_attachments(
     return stage_email(file_path=file_path, message_id=message_id, include_eml=include_eml)
 
 
-@mcp.tool
 def clear_staged_emails(short_hash: Optional[str] = None) -> dict:
     """Delete temporary copies created by `stage_email_attachments`.
 
@@ -311,6 +349,11 @@ def clear_staged_emails(short_hash: Optional[str] = None) -> dict:
         short_hash: Twelve-character staged directory name; null clears all staged message directories.
     """
     return clear_staged(short_hash=short_hash)
+
+
+if not config.disable_staging_tools:
+    mcp.tool(stage_email_attachments)
+    mcp.tool(clear_staged_emails)
 
 
 # macOS-only MailMate actions. Registered only when running on Darwin so the

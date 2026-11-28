@@ -25,6 +25,16 @@ Only `EMAIL_DIR` usually needs changing. Everything else has a sensible default.
 
 Docker's `docker-compose.yml` sets `CHROMADB_PATH`, `MODEL_CACHE_DIR` and `DATABASE_PATH` to paths under `/app/data`, so with Docker you only set `DATA_VOLUME_PATH`.
 
+## Attachment retrieval over MCP
+
+| Variable | Default | Description |
+|---|---|---|
+| `MAX_ATTACHMENT_FETCH_BYTES` | `10485760` (10 MiB) | Maximum decoded bytes per file returned by `get_email_attachments`. |
+| `MAX_ATTACHMENT_FETCH_TOTAL` | `26214400` (25 MiB) | Maximum combined decoded bytes per response, including the optional raw `.eml`. |
+| `DISABLE_STAGING_TOOLS` | `false` | Set to `true` to omit `stage_email_attachments` and `clear_staged_emails` from MCP. Inline attachment retrieval and the CLI staging commands remain available. |
+
+The byte caps accept nonnegative integers. MCP callers can lower either cap for a request. Restart the MCP server after changing its settings.
+
 ## Search quality
 
 Both of these are off by default and run entirely locally.

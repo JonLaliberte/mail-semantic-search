@@ -12,10 +12,23 @@ Everything runs in that one process. SQLite and ChromaDB are opened from disk, a
 | `query_emails` | Fast metadata-only lookup by sender, recipient, subject, date and attachments. Capped at `MAX_FILTERED_SEARCH_LIMIT` (1000); the response reports the applied `limit` and whether results were `truncated`. |
 | `list_inbox_emails` | Newest-first list of messages currently in MailMate IMAP INBOX folders, with optional account filter and date-bound pagination. |
 | `get_status` | Index and configuration summary. |
+| `get_email_attachments` | Read attachment bytes from an indexed email and return them as base64 for the client to decode. |
 | `stage_email_attachments` | Copy an email's attachments (and optionally its `.eml`) to `STAGING_DIR` so a sandboxed client can read them. |
 | `clear_staged_emails` | Delete staged copies: one by `short_hash`, or all. Source emails and the index are never touched. |
 | `open_email` | macOS only. Open a message in MailMate (visible, read-only). |
 | `mark_email_read`, `archive_email`, `mark_read_and_archive` | macOS only. Change message state in MailMate. |
+
+### Fetch attachment bytes
+
+Call `get_email_attachments` with a `message_id` (with or without angle brackets) or exact indexed `file_path` from a search result. If you send both, they must identify the same indexed row. The resolved source must be an `.eml` under `EMAIL_DIR`. The server reads the source and returns a response without staging copies.
+
+Use `attachment_ids` from `query_emails` or exact decoded `filenames` to select attachments. Both filters apply when provided. An empty list selects no attachments. With neither filter, the tool returns all attachment and inline parts, in message order. The result includes the resolved `message_id` and indexed `file_path`, plus `unmatched_attachment_ids` for requested IDs that could not be matched to a MIME part.
+
+Each entry includes `id` (when matched to the index), `filename`, `safe_name`, MIME `content_type`, decoded byte `size`, and, on success, `sha256` (hex) and `data_base64`. A skipped entry has null data and hash and reports `too_large`, `over_total` or `unreadable` in `skipped`. On success `skipped` is null. An unreadable file may have a null size. Set `include_eml=true` to also return the raw message in the separate `eml` field, using the same limits and the budget left after attachments. With `include_eml=false`, `eml` is null.
+
+The default caps are 10 MiB per file and 25 MiB combined, measured before base64 encoding. Entries that exceed either cap do not consume the budget, so later files can still fit. Clients can lower the caps with `max_bytes_per_file` and `max_total_bytes`. Operators can change the server caps and disable the two MCP staging tools with `DISABLE_STAGING_TOOLS=true`. [Attachment settings](configuration.md#attachment-retrieval-over-mcp)
+
+The top-level `status` is `ok` when the source could be read, even if entries were skipped. Other statuses are `not_indexed`, `source_missing`, `source_outside_email_dir` (including a non-`.eml` path), and `source_unreadable`. When configuring a client or proxy with a tool allowlist, give `get_email_attachments` only to clients that should receive the source bytes.
 
 ### Filter semantics (`search_emails` and `query_emails`)
 

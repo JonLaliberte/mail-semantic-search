@@ -60,16 +60,26 @@ def validate_file_path(file_path: str, base_dir: Optional[Path] = None) -> bool:
 class Database:
     """SQLite database for storing email metadata."""
 
-    def __init__(self, db_path: Optional[Path] = None):
+    def __init__(self, db_path: Optional[Path] = None, *, read_only: bool = False):
         """Initialize database connection and create schema if needed.
+
+        A read-only connection requires an existing database and skips setup
+        and migrations.
         
         Note: This database is designed for single-threaded use. If multi-threading
         is needed in the future, implement connection pooling or use thread-local
         connections instead of sharing a single connection.
         """
         self.db_path = db_path or config.database_path
-        self.conn = sqlite3.connect(str(self.db_path))
+        if read_only:
+            uri = self.db_path.absolute().as_uri() + "?mode=ro"
+            self.conn = sqlite3.connect(uri, uri=True)
+        else:
+            self.conn = sqlite3.connect(str(self.db_path))
+
         self.conn.row_factory = sqlite3.Row
+        if read_only:
+            return
         
         # Issue #15: Enable WAL mode for better performance and concurrent reads
         self.conn.execute("PRAGMA journal_mode=WAL")
@@ -664,7 +674,7 @@ class Database:
         """Get all attachments for an email."""
         cursor = self.conn.cursor()
         cursor.execute(
-            "SELECT * FROM attachments WHERE email_id = ?", (email_id,)
+            "SELECT * FROM attachments WHERE email_id = ? ORDER BY id", (email_id,)
         )
         return [dict(row) for row in cursor.fetchall()]
 

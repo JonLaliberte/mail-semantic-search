@@ -32,6 +32,8 @@ class Config:
     # Size limits for memory management (Issues #5, #19)
     DEFAULT_MAX_EMAIL_FILE_SIZE = 50 * 1024 * 1024  # 50MB
     DEFAULT_MAX_ATTACHMENT_SIZE = 10 * 1024 * 1024  # 10MB for text extraction
+    DEFAULT_MAX_ATTACHMENT_FETCH_BYTES = 10 * 1024 * 1024
+    DEFAULT_MAX_ATTACHMENT_FETCH_TOTAL = 25 * 1024 * 1024
     
     # Database batch limits (Issue #6)
     MAX_IN_CLAUSE_SIZE = 500
@@ -87,6 +89,15 @@ class Config:
             os.path.expanduser("~/Documents/mailmate-staged"),
         )
         self.staging_dir = Path(staging_dir)
+        self.disable_staging_tools = self._parse_bool(os.getenv("DISABLE_STAGING_TOOLS", "false"))
+        self.max_attachment_fetch_bytes = int(
+            os.getenv("MAX_ATTACHMENT_FETCH_BYTES", str(self.DEFAULT_MAX_ATTACHMENT_FETCH_BYTES))
+        )
+        self.max_attachment_fetch_total = int(
+            os.getenv("MAX_ATTACHMENT_FETCH_TOTAL", str(self.DEFAULT_MAX_ATTACHMENT_FETCH_TOTAL))
+        )
+        if min(self.max_attachment_fetch_bytes, self.max_attachment_fetch_total) < 0:
+            raise ValueError("Attachment fetch limits must be nonnegative byte counts")
 
         # Which URL scheme email results use for `markdown_link`. Apple Mail
         # claims `message:` on macOS, so `mid:` routes to MailMate more

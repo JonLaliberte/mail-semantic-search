@@ -1,6 +1,10 @@
 """MCP tools should publish enough schema guidance for agents to use them safely."""
 
 import asyncio
+import json
+import os
+import subprocess
+import sys
 
 from mail_semantic_search.mcp_server import mcp
 
@@ -16,6 +20,7 @@ def test_tool_parameters_have_schema_descriptions():
         "query_emails",
         "get_status",
         "list_inbox_emails",
+        "get_email_attachments",
         "stage_email_attachments",
         "clear_staged_emails",
     }
@@ -46,3 +51,22 @@ def test_state_changing_tools_are_labeled_when_available():
             assert "state-chang" in tools[name].description.lower()
 
     assert "never source emails" in tools["clear_staged_emails"].description
+
+
+def test_disable_staging_tools_omits_only_staging_tools():
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import asyncio, json; from mail_semantic_search.mcp_server import mcp; "
+            "print(json.dumps(sorted(tool.name for tool in asyncio.run(mcp.list_tools()))))",
+        ],
+        env={**os.environ, "DISABLE_STAGING_TOOLS": "1"},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert set(json.loads(result.stdout)) == _tools_by_name().keys() - {
+        "stage_email_attachments",
+        "clear_staged_emails",
+    }

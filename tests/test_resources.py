@@ -179,7 +179,8 @@ def test_deferred_mcp_cache_clear_runs_off_event_loop(mps_cache, monkeypatch):
                 scope.cancel()
                 await anyio.sleep_forever()
 
-            await mcp_server._ResourceUseMiddleware().on_call_tool(None, tool)
+            context = SimpleNamespace(message=SimpleNamespace(name="search_emails"))
+            await mcp_server._ResourceUseMiddleware().on_call_tool(context, tool)
         assert scope.cancelled_caught
 
     asyncio.run(call())

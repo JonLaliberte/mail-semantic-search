@@ -5,7 +5,7 @@ the last of which Chroma holds entirely in RAM (gigabytes on a large mailbox).
 A one-shot CLI run gives all of that back when it exits, but the MCP server
 lives for days and is idle for nearly all of them.
 
-So the server brackets every tool call with `in_use()`, which keeps the index
+The server brackets search tool calls with `in_use()`, which keeps the index
 and models loaded across back-to-back calls, and runs a reaper that drops them
 once nothing has used them for a while. The next call reloads them (a second
 or two) transparently.
