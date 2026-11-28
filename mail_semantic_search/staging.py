@@ -23,7 +23,7 @@ import os
 import re
 import shutil
 import stat
-from collections import defaultdict, deque
+from collections import defaultdict
 from pathlib import Path
 from typing import BinaryIO, Dict, Iterator, List, NamedTuple, Optional
 
@@ -136,7 +136,8 @@ def _unique_name(name: str, used_names: set[str], next_suffix: dict[str, int]) -
         marker = f"-{number}"
         # Keep the extension when possible and reserve space for the marker.
         short_suffix = suffix[: 200 - len(marker)]
-        safe_name = f"{stem[: 200 - len(marker) - len(short_suffix)]}{marker}{short_suffix}"
+        candidate = f"{stem[: 200 - len(marker) - len(short_suffix)]}{marker}{short_suffix}"
+        safe_name = _safe_filename(candidate, marker)
         number += 1
     next_suffix[name_key] = number
     used_names.add(safe_name.casefold())
@@ -232,13 +233,13 @@ def _decoded_size(raw: str, encoding: str) -> Optional[int]:
     return size
 
 
-def _attachment_sizes(part: email.message.Message) -> tuple[Optional[int], tuple[int, ...]]:
+def _attachment_sizes(part: email.message.Message) -> tuple[Optional[int], tuple[Optional[int], ...]]:
     """Return the local decoded size and possible sizes recorded by the index."""
     # The parser stores escapes for non-ASCII bytes. get_payload(decode=False)
     # can replace them using the part's charset, which loses the byte count.
     raw = part._payload
     if not isinstance(raw, str):
-        return None, (0,)
+        return None, (None,)
     cte = part.get("Content-Transfer-Encoding", "")
     old_encoding = str(cte).lower()
     token_encoding = getattr(cte, "cte", old_encoding.strip())
@@ -254,38 +255,63 @@ def _attachment_sizes(part: email.message.Message) -> tuple[Optional[int], tuple
     if indexed_size:
         return size, (indexed_size,)
 
-    # For invalid-length base64 the index counted the undecoded text.
-    fallback = len(raw) - raw.count("\r") - raw.count("\n") if size is None else size
+    # An unreadable transfer encoding has no trustworthy indexed size.
+    # Different Python decoders can return raw bytes or a partial decode.
     if other == local:
-        return size, (fallback,)
-    other_size = _decoded_size(raw, other)
-    if other_size is None:
-        other_size = len(raw) - raw.count("\r") - raw.count("\n")
-    return size, (fallback, other_size)
+        return size, (size,)
+    return size, (size, _decoded_size(raw, other))
 
 
 def _match_attachment_ids(
-    part_sizes: list[tuple[int, ...]], rows: list[Dict]
-) -> list[Optional[int]]:
-    """Match one filename/type group, preferring a complete match in MIME order."""
+    part_sizes: list[tuple[Optional[int], ...]], rows: list[Dict]
+) -> tuple[list[Optional[int]], dict[int, str]]:
+    """Use MIME order for a complete match and mutually unique evidence for fallback."""
     if len(part_sizes) == len(rows) and any(
-        all(row["size"] == sizes[variant] for sizes, row in zip(part_sizes, rows))
+        all(sizes[variant] is not None and row["size"] == sizes[variant]
+            for sizes, row in zip(part_sizes, rows))
         for variant in (0, -1)
     ):
         # Same-name leaves can share a possible size across runtimes. Pair them
         # in the order the indexer stored them before trying local sizes alone.
-        return [row["id"] for row in rows]
+        return [row["id"] for row in rows], {}
 
-    # A changed source may lack some indexed parts. Keep exact-size matching
-    # for the parts that remain rather than using ambiguous alternate sizes.
-    ids_by_size = defaultdict(deque)
+    rows_by_size = defaultdict(int)
     for row in rows:
-        ids_by_size[row["size"]].append(row["id"])
-    matched = []
-    for local_size, *_ in part_sizes:
-        ids = ids_by_size.get(local_size)
-        matched.append(ids.popleft() if ids else None)
-    return matched
+        rows_by_size[row["size"]] += 1
+
+    positions_by_size = defaultdict(list)
+    unknown_positions = []
+    possible_rows_per_part = []
+    for position, sizes in enumerate(part_sizes):
+        if None in sizes:
+            # This part could occupy any of the indexed rows in the group.
+            # It blocks an apparent match but cannot establish one.
+            unknown_positions.append(position)
+            possible_rows_per_part.append(len(rows))
+            continue
+        distinct_sizes = set(sizes)
+        for size in distinct_sizes:
+            positions_by_size[size].append(position)
+        possible_rows_per_part.append(sum(rows_by_size[size] for size in distinct_sizes))
+
+    matched: list[Optional[int]] = [None] * len(part_sizes)
+    reasons = {}
+    for row in rows:
+        candidates = positions_by_size.get(row["size"], [])
+        count = len(candidates) + len(unknown_positions)
+        if count == 0:
+            continue
+        if count > 1:
+            reasons[row["id"]] = "ambiguous"
+            continue
+        position = candidates[0] if candidates else unknown_positions[0]
+        if possible_rows_per_part[position] > 1:
+            reasons[row["id"]] = "ambiguous"
+        elif candidates:
+            matched[position] = row["id"]
+        else:
+            reasons[row["id"]] = "size_unknown"
+    return matched, reasons
 
 
 def _open_email_source(path: Path) -> BinaryIO:
@@ -369,6 +395,7 @@ def fetch_attachments(
         "attachments": [],
         "eml": None,
         "unmatched_attachment_ids": sorted(requested_ids or ()),
+        "unmatched_attachment_id_reasons": {},
     }
     if not config.database_path.is_file():
         return result
@@ -452,10 +479,12 @@ def fetch_attachments(
         parts.append((part, filename, size, indexed_sizes))
 
     ids = [None] * len(parts)
+    id_reasons = {}
     for key, positions in positions_by_part.items():
-        matched = _match_attachment_ids(
+        matched, reasons = _match_attachment_ids(
             [parts[position][3] for position in positions], rows_by_part.get(key, [])
         )
+        id_reasons.update(reasons)
         for position, attachment_id in zip(positions, matched, strict=True):
             ids[position] = attachment_id
 
@@ -491,7 +520,14 @@ def fetch_attachments(
         result["eml"] = _source_entry(
             source_size, source_payload if skipped is None else None, skipped, source_name
         )
-    result.update(status="ok", unmatched_attachment_ids=sorted(unmatched_ids))
+    result.update(
+        status="ok",
+        unmatched_attachment_ids=sorted(unmatched_ids),
+        unmatched_attachment_id_reasons={
+            str(attachment_id): id_reasons[attachment_id]
+            for attachment_id in sorted(unmatched_ids) if attachment_id in id_reasons
+        },
+    )
     return result
 
 

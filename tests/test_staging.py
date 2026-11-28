@@ -497,6 +497,19 @@ def test_fetch_and_stage_safe_names_and_empty_part_parity(indexed_message):
         assert base64.b64decode(entry["data_base64"]) == data
 
 
+def test_collision_truncation_does_not_leave_a_windows_reserved_suffix(indexed_message):
+    source, _ = indexed_message
+    long_name = "a." + "x" * 196 + " z"
+    _build_eml_with_attachments(source, [
+        (long_name, "application/octet-stream", b"first"),
+        (long_name, "application/octet-stream", b"second"),
+    ])
+    fetched = fetch_attachments(file_path=str(source))["attachments"]
+    assert len({entry["safe_name"].casefold() for entry in fetched}) == 2
+    assert all(entry["safe_name"] == entry["safe_name"].rstrip(" .") for entry in fetched)
+    assert all(len(entry["safe_name"]) <= 200 for entry in fetched)
+
+
 @pytest.mark.parametrize(("encoding", "wire", "decoded"), [
     ("base64", b"QU\nJDag", b"ABCj"),
     ("quoted-printable", b"A=42=\r\nC==D=", b"ABC=D"),
@@ -622,6 +635,58 @@ def test_fetch_matches_ids_for_a_copied_index_across_decoder_versions(indexed_me
     assert [base64.b64decode(entry["data_base64"]) for entry in result["attachments"]] == [
         Path(entry["path"]).read_bytes() for entry in staged["attachments"]
     ]
+
+
+@pytest.mark.parametrize(("indexed_size", "sibling"), [(3, b"XYZ"), (1, b"X")])
+def test_fetch_does_not_give_unreadable_parts_ids_to_same_name_siblings(
+    indexed_message, indexed_size, sibling
+):
+    source, _ = indexed_message
+    _write_crlf_message(source, [
+        ("receipt.txt", b"base64", b"YQ==Yg=="),
+        ("receipt.txt", b"7bit", sibling),
+    ])
+    message = parse_email_file(source)
+    # Python 3.14 records three bytes for the embedded-padding part,
+    # whereas 3.12 records one. Exercise both index shapes on every runtime.
+    message["attachments"][0]["size"] = indexed_size
+    with Database() as database:
+        email_id = database.add_email(message, message["attachments"], file_mtime=1000.0)
+        ids = [row["id"] for row in database.get_attachments(email_id)]
+
+    for attachment_id in ids:
+        result = fetch_attachments(file_path=str(source), attachment_ids=[attachment_id])
+        assert result["attachments"] == []
+        assert result["unmatched_attachment_ids"] == [attachment_id]
+        assert result["unmatched_attachment_id_reasons"] == {str(attachment_id): "ambiguous"}
+
+    result = fetch_attachments(file_path=str(source), filenames=["receipt.txt"])
+    unreadable, readable = result["attachments"]
+    assert unreadable["id"] is readable["id"] is None
+    assert unreadable["skipped"] == "unreadable"
+    assert base64.b64decode(readable["data_base64"]) == sibling
+
+
+def test_fetch_only_matches_unambiguous_ids_after_removing_a_same_name_part(indexed_message):
+    source, _ = indexed_message
+    attachments = [("receipt.txt", b"7bit", data) for data in (b"one", b"two", b"three")]
+    _write_crlf_message(source, attachments)
+    message = parse_email_file(source)
+    with Database() as database:
+        email_id = database.add_email(message, message["attachments"], file_mtime=1000.0)
+        ids = [row["id"] for row in database.get_attachments(email_id)]
+    _write_crlf_message(source, attachments[1:])
+
+    for attachment_id in ids[:2]:
+        result = fetch_attachments(file_path=str(source), attachment_ids=[attachment_id])
+        assert result["attachments"] == []
+        assert result["unmatched_attachment_ids"] == [attachment_id]
+        assert result["unmatched_attachment_id_reasons"] == {str(attachment_id): "ambiguous"}
+
+    result = fetch_attachments(file_path=str(source), attachment_ids=[ids[2]])
+    entry, = result["attachments"]
+    assert entry["id"] == ids[2]
+    assert base64.b64decode(entry["data_base64"]) == b"three"
 
 
 def test_fetch_raw_message_has_unique_basename(indexed_message):
