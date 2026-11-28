@@ -12,10 +12,29 @@ Everything runs in that one process. SQLite and ChromaDB are opened from disk, a
 | `query_emails` | Fast metadata-only lookup by sender, recipient, subject, date and attachments. Capped at `MAX_FILTERED_SEARCH_LIMIT` (1000); the response reports the applied `limit` and whether results were `truncated`. |
 | `list_inbox_emails` | Newest-first list of messages currently in MailMate IMAP INBOX folders, with optional account filter and date-bound pagination. |
 | `get_status` | Index and configuration summary. |
+| `get_email_attachments` | Read attachment bytes from an indexed email and return them as base64 for the client to decode. |
 | `stage_email_attachments` | Copy an email's attachments (and optionally its `.eml`) to `STAGING_DIR` so a sandboxed client can read them. |
 | `clear_staged_emails` | Delete staged copies: one by `short_hash`, or all. Source emails and the index are never touched. |
 | `open_email` | macOS only. Open a message in MailMate (visible, read-only). |
 | `mark_email_read`, `archive_email`, `mark_read_and_archive` | macOS only. Change message state in MailMate. |
+
+### Fetch attachment bytes
+
+Call `get_email_attachments` with a `message_id` (with or without angle brackets) or exact indexed `file_path` from a search result. If you send both, they must identify the same indexed row. The resolved source must be an `.eml` under `EMAIL_DIR`. The server reads the source and returns a response without staging copies.
+
+Use `attachment_ids` from `query_emails` or exact decoded `filenames` to select attachments. Both filters apply when provided. An empty list selects no attachments. Pass the exact `file_path` from the same result when selecting by attachment IDs. If several indexed copies share a Message-ID, an ID-only message lookup can select a different copy. Re-indexing recreates the attachment rows and can change their IDs, so query again if the IDs have gone stale. `unmatched_attachment_ids` lists requested IDs that could not be mapped to MIME parts in the selected copy, including stale IDs and metadata that no longer matches the source. To recover attachments when IDs stay unmatched, retry with the exact `file_path` and decoded filenames.
+
+When an ID cannot be assigned safely, `unmatched_attachment_id_reasons` can report `ambiguous` for competing ID or MIME part matches, or `size_unknown` when the part's indexed size cannot be determined. The tool omits those attachments from ID-filtered results.
+
+With neither filter, the tool walks the MIME tree in message order and includes attachment and inline leaf parts. It omits empty parts and multipart containers, including the attached message itself when `message/rfc822` is parsed as a nested message.
+
+Read the result from the MCP response's `structuredContent`. Each entry includes `id` (when matched to the index), `filename`, `safe_name`, MIME `content_type`, decoded byte `size`, and, on success, `sha256` (hex) and `data_base64`. Use only `safe_name` as the basename when saving to a client-controlled directory. The original `filename` is for display and can contain path separators. A skipped entry has null data and hash and reports `too_large`, `over_total` or `unreadable` in `skipped`. On success `skipped` is null. An unreadable file may have a null size. Set `include_eml=true` to also return the raw message in the separate `eml` field, using the same limits and the budget left after attachments. With `include_eml=false`, `eml` is null.
+
+Attachment bytes follow the same MIME parsing as local staging, including newline handling. The raw message preserves the original source bytes. Attachment and raw message `safe_name` values are unique within a response, including on case-insensitive filesystems. The tool renames Windows device basenames and strips trailing dots and spaces. The raw message normally uses `message.eml` and gets a numbered suffix when that name is taken.
+
+The default caps are 10 MiB per file and 25 MiB combined, measured before base64 encoding. Entries that exceed either cap do not consume the budget, so later files can still fit. Clients can lower the caps with `max_bytes_per_file` and `max_total_bytes`. Operators can change the server caps and disable the two MCP staging tools with `DISABLE_STAGING_TOOLS=true`. [Attachment settings](configuration.md#attachment-retrieval-over-mcp)
+
+The top-level `status` is `ok` when the source could be read, even if entries were skipped. Other statuses are `not_indexed`, `source_missing`, `source_outside_email_dir` (including a non-`.eml` path), `source_unreadable`, and `source_too_large`. Sources above `MAX_EMAIL_FILE_SIZE` are rejected before MIME parsing. When `include_eml=true`, an oversized source also has `eml.skipped` set to `too_large`. When configuring a client or proxy with a tool allowlist, give `get_email_attachments` only to clients that should receive the source bytes.
 
 ### Filter semantics (`search_emails` and `query_emails`)
 

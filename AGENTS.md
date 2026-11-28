@@ -204,6 +204,8 @@ Measured on 703k vectors (Apple Silicon, 2026-10-03): index 4.56 GB → 2.26 GB,
 
 On Apple Silicon, `torch.mps.empty_cache()` releases unused allocator buffers and, since PyTorch 2.13, clears the MPSGraph cache. The allocator or driver can still retain memory. The server requests a clear after each scheduled index pass that runs and when it drops the models on idle. `resources.py` defers the clear until all index passes and tool calls finish because the graph cache can contain objects a concurrent inference is still using. MCP middleware enters and exits the resource context in worker threads so cache clearing and waits for the resource lock stay off the event loop.
 
+The `get_email_attachments` MCP tool bypasses that resource middleware. It uses a read-only SQLite snapshot and the maildir, so calling it does not open Chroma or load models.
+
 ## Fixed input shapes on MPS
 
 PyTorch 2.10's MPS backend kept GPU memory for every distinct input shape, even after `torch.mps.empty_cache()`. sentence-transformers pads each batch only to its longest text, and the last batch of a call is whatever is left over, so almost every batch of real mail is a new shape. A server indexing every 5 minutes reached 17 GB of `IOAccelerator (graphics)` in `vmmap --summary` after 12 days (2026-11-25), and 120 random-length batches in isolation went from 2 GB to 14 GB. Keep the shape bounds with PyTorch 2.15 to limit growth between cache clears.
