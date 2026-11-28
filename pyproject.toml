@@ -10,7 +10,7 @@ dependencies = [
     "torch>=2.15,<2.16; sys_platform == 'darwin' and platform_machine == 'arm64'",
     "chromadb>=0.4.0",
     "click>=8.1.0",
-    "fastmcp",
+    "fastmcp>=3.3.1",
     "python-dotenv>=1.0.0",
     "tqdm>=4.65.0",
     "unquotemail>=0.1.0",
@@ -29,6 +29,7 @@ dev = ["pytest>=8.0"]
 [project.scripts]
 mail-semantic-search = "mail_semantic_search.cli:main"
 mail-semantic-search-mcp = "mail_semantic_search.mcp_server:main"
+mail-semantic-search-stager = "mail_semantic_search.attachment_stager:main"
 
 [tool.setuptools]
 packages = ["mail_semantic_search"]
