@@ -392,6 +392,16 @@ def test_fetch_reports_an_undecodable_part(indexed_message):
     assert result["attachments"][1]["skipped"] is None
 
 
+def test_stage_keeps_invalid_base64_raw_fallback(indexed_message):
+    source, _ = indexed_message
+    message = BytesParser(policy=policy.default).parsebytes(source.read_bytes())
+    message.get_payload()[1].set_payload("A")  # A single base64 character cannot be decoded.
+    source.write_bytes(message.as_bytes())
+
+    staged = stage_email(file_path=str(source), include_eml=False)
+    assert Path(staged["attachments"][0]["path"]).read_bytes() == b"A"
+
+
 def test_fetch_decodes_only_selected_parts_that_fit(indexed_message, monkeypatch):
     from mail_semantic_search import staging
 
@@ -455,6 +465,9 @@ def test_fetch_and_stage_safe_names_and_empty_part_parity(indexed_message):
         ("invoice-2.pdf", b"fourth"),
         (".bashrc", b"fifth"),
         ("...", b"sixth"),
+        (". .notes", b"seventh"),
+        (". .", b"eighth"),
+        (". ..", b"ninth"),
         ("empty.txt", b""),
     ]
     _build_eml_with_attachments(
@@ -495,6 +508,50 @@ def test_fetch_preflight_matches_transfer_encoding(indexed_message, encoding, wi
     entry = result["attachments"][0]
     assert entry["size"] == len(decoded)
     assert base64.b64decode(entry["data_base64"]) == decoded
+
+
+@pytest.mark.parametrize(("header", "wire"), [
+    (b"base64 ", b"YWJj"),
+    (b"quoted-printable (comment)", b"a=62c"),
+])
+def test_fetch_preflight_matches_index_for_noncanonical_encoding(indexed_message, header, wire):
+    source, _ = indexed_message
+    source.write_bytes(
+        b'Content-Type: application/octet-stream\r\n'
+        b'Content-Disposition: attachment; filename="encoding-test.bin"\r\n'
+        b"Content-Transfer-Encoding: " + header + b"\r\n\r\n" + wire
+    )
+    message = BytesParser(policy=policy.default).parsebytes(source.read_bytes())
+    expected = message.get_payload(decode=True)
+    attachments = extract_attachments(message, extract_text=False)
+    with Database() as database:
+        email_id = _index_email(database, str(source), attachments=attachments)
+        attachment_id = database.get_attachments(email_id)[0]["id"]
+
+    result = fetch_attachments(
+        file_path=str(source), attachment_ids=[attachment_id], max_bytes_per_file=len(expected)
+    )
+    assert result["unmatched_attachment_ids"] == []
+    entry, = result["attachments"]
+    assert entry["id"] == attachment_id
+    assert entry["size"] == len(expected)
+    assert base64.b64decode(entry["data_base64"]) == expected
+
+    limited = fetch_attachments(file_path=str(source), max_bytes_per_file=len(expected) - 1)
+    assert limited["attachments"][0]["skipped"] == "too_large"
+
+
+def test_fetch_raw_message_has_unique_basename(indexed_message):
+    source, _ = indexed_message
+    _build_eml_with_attachments(source, [
+        ("Message.eml", "application/octet-stream", b"first"),
+        ("MESSAGE-2.EML", "application/octet-stream", b"second"),
+    ])
+
+    result = fetch_attachments(file_path=str(source), include_eml=True)
+    assert [entry["safe_name"] for entry in result["attachments"]] == ["Message.eml", "MESSAGE-2.EML"]
+    assert result["eml"]["safe_name"] == "message-3.eml"
+    assert base64.b64decode(result["eml"]["data_base64"]) == source.read_bytes()
 
 
 def test_fetch_only_opens_indexed_eml_under_email_dir(indexed_message, tmp_path):

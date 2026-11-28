@@ -37,6 +37,13 @@ _UU_MODE = re.compile(r"begin [+-]?(?:0[oO]_?)?[0-7](?:_?[0-7])*(?=[ \r\n]|\Z)")
 _UU_END = re.compile(r"[ \t\f]*end[ \t\f]*")
 _UU_BODY = re.compile(r"[ -`]*")
 _UU_ENCODINGS = {"x-uuencode", "uuencode", "uue", "x-uue"}
+_SOURCE_FILENAME = "message.eml"
+
+# Match the email decoder used for indexing. Older Python releases compare
+# the full transfer-encoding header, while newer releases use the parsed token.
+_DECODER_USES_CTE_TOKEN = email.message_from_bytes(
+    b"Content-Transfer-Encoding: base64 \r\n\r\nYWJj", policy=email.policy.default
+).get_payload(decode=True) == b"abc"
 
 
 def _safe_filename(name: str, fallback: str) -> str:
@@ -45,7 +52,7 @@ def _safe_filename(name: str, fallback: str) -> str:
     if not name:
         return fallback
     name = _SAFE_FILENAME_RE.sub("_", name)
-    name = re.sub(r"\s+", " ", name).lstrip(".").strip()
+    name = re.sub(r"\s+", " ", name).lstrip(" .").rstrip()
     if not name:
         return fallback
     return name[:200]  # filesystem limit guard
@@ -115,6 +122,23 @@ class AttachmentPart(NamedTuple):
     mime_part: email.message.Message
 
 
+def _unique_name(name: str, used_names: set[str], next_suffix: dict[str, int]) -> str:
+    """Allocate a unique basename, including on case-insensitive volumes."""
+    stem, suffix = os.path.splitext(name)
+    safe_name = name
+    name_key = name.casefold()
+    number = next_suffix.get(name_key, 2)
+    while safe_name.casefold() in used_names:
+        marker = f"-{number}"
+        # Keep the extension when possible and reserve space for the marker.
+        short_suffix = suffix[: 200 - len(marker)]
+        safe_name = f"{stem[: 200 - len(marker) - len(short_suffix)]}{marker}{short_suffix}"
+        number += 1
+    next_suffix[name_key] = number
+    used_names.add(safe_name.casefold())
+    return safe_name
+
+
 def iter_attachment_parts(msg: email.message.Message) -> Iterator[AttachmentPart]:
     """Yield named attachment leaves in MIME traversal order without decoding."""
     used_names: set[str] = set()
@@ -133,27 +157,19 @@ def iter_attachment_parts(msg: email.message.Message) -> Iterator[AttachmentPart
             extension = "." + extension
         fallback = f"attachment-{idx}{extension}"[:200]
         name = _safe_filename(filename, fallback)
-        stem, suffix = os.path.splitext(name)
-        safe_name = name
-        name_key = name.casefold()
-        number = next_suffix.get(name_key, 2)
-        while safe_name.casefold() in used_names:
-            marker = f"-{number}"
-            # Keep the extension when possible and reserve space for the marker.
-            short_suffix = suffix[: 200 - len(marker)]
-            safe_name = f"{stem[: 200 - len(marker) - len(short_suffix)]}{marker}{short_suffix}"
-            number += 1
-        next_suffix[name_key] = number
-        used_names.add(safe_name.casefold())
-        yield AttachmentPart(filename, safe_name, content_type, part)
+        yield AttachmentPart(filename, _unique_name(name, used_names, next_suffix), content_type, part)
 
 
-def _decode_payload(part: email.message.Message) -> Optional[bytes]:
+def _decode_payload(
+    part: email.message.Message, *, preserve_invalid_base64: bool = False
+) -> Optional[bytes]:
     try:
         payload = part.get_payload(decode=True)
     except (LookupError, TypeError, ValueError, binascii.Error):
         return None
-    if any(isinstance(defect, email.errors.InvalidBase64LengthDefect) for defect in part.defects):
+    if not preserve_invalid_base64 and any(
+        isinstance(defect, email.errors.InvalidBase64LengthDefect) for defect in part.defects
+    ):
         return None
     return payload
 
@@ -207,7 +223,10 @@ def _attachment_sizes(part: email.message.Message) -> tuple[Optional[int], int]:
     if not isinstance(raw, str):
         return None, 0
     cte = part.get("Content-Transfer-Encoding", "")
-    encoding = getattr(cte, "cte", str(cte).strip().lower())
+    if _DECODER_USES_CTE_TOKEN:
+        encoding = getattr(cte, "cte", str(cte).strip().lower())
+    else:
+        encoding = str(cte).lower()
     size = len(raw)
     if encoding == "base64":
         size = _base64_size(raw)
@@ -414,15 +433,19 @@ def fetch_attachments(
 
     if include_eml:
         skipped = _skip_reason(source_size, per_file, remaining)
+        used_names = {entry["safe_name"].casefold() for entry in result["attachments"]}
+        source_name = _unique_name(_SOURCE_FILENAME, used_names, {})
         result["eml"] = _source_entry(
-            source_size, source_payload if skipped is None else None, skipped
+            source_size, source_payload if skipped is None else None, skipped, source_name
         )
     result.update(status="ok", unmatched_attachment_ids=sorted(unmatched_ids))
     return result
 
 
-def _source_entry(size: int, payload: Optional[bytes], skipped: Optional[str]) -> Dict:
-    return _fetch_entry("message.eml", "message.eml", "message/rfc822", size, payload, skipped)
+def _source_entry(
+    size: int, payload: Optional[bytes], skipped: Optional[str], safe_name: str = _SOURCE_FILENAME
+) -> Dict:
+    return _fetch_entry(_SOURCE_FILENAME, safe_name, "message/rfc822", size, payload, skipped)
 
 
 def stage_email(
@@ -486,7 +509,7 @@ def stage_email(
 
     eml_path: Optional[Path] = None
     if include_eml:
-        eml_path = staged_dir / "message.eml"
+        eml_path = staged_dir / _SOURCE_FILENAME
         shutil.copyfile(source, eml_path)
 
     # Walk the email to write each attachment as its own decoded file.
@@ -495,7 +518,8 @@ def stage_email(
 
     saved: List[Dict] = []
     for part in iter_attachment_parts(msg):
-        payload = _decode_payload(part.mime_part)
+        # Preserve the raw fallback the local staging tool has always written.
+        payload = _decode_payload(part.mime_part, preserve_invalid_base64=True)
         if not payload:
             continue
 
