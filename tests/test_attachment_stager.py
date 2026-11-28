@@ -2,10 +2,12 @@ import asyncio
 import base64
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import certifi
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
+import httpx
 import pytest
 
 from mail_semantic_search import attachment_stager
@@ -30,10 +32,9 @@ def stager(tmp_path, monkeypatch):
     calls = []
 
     class Remote:
-        def __init__(self, url, *, auth, verify, timeout):
-            assert url == "https://example.test/mcp"
-            assert auth == "synthetic-test-token"
-            assert verify.check_hostname and timeout == 120
+        def __init__(self, transport, *, timeout):
+            assert str(transport.url) == "https://example.test/mcp"
+            assert transport.httpx_client_factory.args[0].check_hostname and timeout == 120
 
         async def __aenter__(self):
             return self
@@ -46,7 +47,7 @@ def stager(tmp_path, monkeypatch):
             return SimpleNamespace(structured_content=result)
 
     monkeypatch.setattr(attachment_stager, "Client", Remote)
-    root = tmp_path / "staged"
+    root = tmp_path.resolve() / "staged"
     server = attachment_stager.create_server(
         "https://example.test/mcp", token, Path(certifi.where()), root,
     )
@@ -133,9 +134,144 @@ def test_existing_file_symlink_is_replaced_and_directory_symlink_is_rejected(sta
             path.unlink()
             path.parent.rmdir()
             path.parent.symlink_to(tmp_path, target_is_directory=True)
-            with pytest.raises(ToolError, match="staging subdirectory is unsafe"):
+            with pytest.raises(ToolError, match="staging directory is unsafe"):
                 await client.call_tool("stage_email_attachments", args)
             assert not (tmp_path / "receipt.txt").exists()
             assert Path(first["staged_dir"]).parent == root
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("root_kind", ["symlink", "writable", "foreign"])
+def test_unsafe_root_blocks_writes_and_clearing(stager, tmp_path, monkeypatch, root_kind):
+    client, root, _, _ = stager
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    child = outside / "aaaaaaaaaaaa"
+    child.mkdir()
+    kept = child / "keep"
+    kept.write_bytes(b"keep")
+    if root_kind == "symlink":
+        root.symlink_to(outside, target_is_directory=True)
+    else:
+        outside.rename(root)
+        kept = root / child.name / kept.name
+        if root_kind == "writable":
+            root.chmod(0o770)
+        else:
+            uid = root.stat().st_uid
+            monkeypatch.setattr(attachment_stager.os, "geteuid", lambda: uid + 1)
+
+    async def run():
+        async with client:
+            with pytest.raises(ToolError, match="staging directory is unsafe"):
+                await client.call_tool("stage_email_attachments", {"file_path": "/indexed/message.eml"})
+            with pytest.raises(ToolError, match="staging directory is unsafe"):
+                await client.call_tool("clear_staged_emails", {})
+
+    asyncio.run(run())
+    assert kept.read_bytes() == b"keep"
+
+
+def test_directory_replacement_cannot_redirect_staged_writes(stager, tmp_path, monkeypatch):
+    client, root, _, _ = stager
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    save = attachment_stager._save
+
+    def exchange(directory, entry):
+        staged, = root.iterdir()
+        (staged / "attachments").rename(staged / "old-attachments")
+        (staged / "attachments").symlink_to(outside, target_is_directory=True)
+        return save(directory, entry)
+
+    monkeypatch.setattr(attachment_stager, "_save", exchange)
+
+    async def run():
+        async with client:
+            with pytest.raises(ToolError, match="directory changed"):
+                await client.call_tool("stage_email_attachments", {
+                    "file_path": "/indexed/message.eml", "include_eml": False,
+                })
+
+    asyncio.run(run())
+    assert list(outside.iterdir()) == []
+
+
+def test_directory_replacement_cannot_redirect_clear(stager, tmp_path, monkeypatch):
+    client, root, _, _ = stager
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    kept = outside / "keep"
+    kept.write_bytes(b"keep")
+    remove = attachment_stager._remove_contents
+
+    async def run():
+        async with client:
+            reply = await client.call_tool("stage_email_attachments", {"file_path": "/indexed/message.eml"})
+            staged = Path(reply.structured_content["staged_dir"])
+            seen = False
+
+            def exchange(fd):
+                nonlocal seen
+                if not seen:
+                    seen = True
+                    staged.rename(root / "displaced")
+                    staged.symlink_to(outside, target_is_directory=True)
+                return remove(fd)
+
+            monkeypatch.setattr(attachment_stager, "_remove_contents", exchange)
+            with pytest.raises(ToolError, match="directory changed"):
+                await client.call_tool("clear_staged_emails", {"short_hash": staged.name})
+
+    asyncio.run(run())
+    assert kept.read_bytes() == b"keep"
+
+
+@pytest.mark.parametrize(("headers", "chunks", "seen"), [
+    ({"Content-Length": "8"}, [b"12345678"], []),
+    ({"Content-Encoding": "gzip"}, [b"12345678"], []),
+    ({}, [b"1234", b"5678", b"never read"], [b"1234", b"5678"]),
+])
+def test_response_is_bounded_before_httpx_buffers_it(monkeypatch, headers, chunks, seen):
+    monkeypatch.setattr(attachment_stager, "MAX_RESPONSE_BYTES", 6)
+    consumed = []
+    closed = []
+
+    class Stream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            for chunk in chunks:
+                consumed.append(chunk)
+                yield chunk
+
+        async def aclose(self):
+            closed.append(True)
+
+    async def upstream(self, request):
+        assert request.headers["accept-encoding"] == "identity"
+        return httpx.Response(200, headers=headers, stream=Stream())
+
+    async def run():
+        with patch.object(httpx.AsyncHTTPTransport, "handle_async_request", upstream):
+            async with attachment_stager._http_client(True) as client:
+                with pytest.raises(ValueError, match="transfer limit|content encoding"):
+                    await client.post("https://example.test/mcp")
+
+    asyncio.run(run())
+    assert consumed == seen and closed
+
+
+def test_stager_http_client_does_not_follow_redirects():
+    received = []
+
+    async def upstream(self, request):
+        received.append(str(request.url))
+        return httpx.Response(307, headers={"Location": "http://other.test/mcp"})
+
+    async def run():
+        with patch.object(httpx.AsyncHTTPTransport, "handle_async_request", upstream):
+            async with attachment_stager._http_client(True, follow_redirects=True) as client:
+                assert (await client.post("https://example.test/mcp")).status_code == 307
+
+    asyncio.run(run())
+    assert received == ["https://example.test/mcp"]
